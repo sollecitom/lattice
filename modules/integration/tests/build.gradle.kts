@@ -1,0 +1,16 @@
+dependencies {
+    testImplementation(projects.aggregateDomain)
+    testImplementation(projects.aggregateTestUtils)
+    testImplementation(projects.eventStoreDomain)
+    testImplementation(projects.eventStoreInMemoryImplementation)
+    testImplementation(projects.recoveryStoreDomain)
+    testImplementation(projects.recoveryStoreInMemoryImplementation)
+    testImplementation(projects.aggregateRepositoryDomain)
+    testImplementation(projects.aggregateRepositoryDefaultImplementation)
+    testImplementation(projects.projectionDomain)
+    testImplementation(projects.projectionInMemoryImplementation)
+    testImplementation(projects.commandGatewayDomain)
+    testImplementation(projects.commandGatewayLocalImplementation)
+    testImplementation(libs.sollecitom.swissknife.test.utils)
+    testImplementation(libs.sollecitom.swissknife.logging.standard.slf4j.configuration)
+}

@@ -1,0 +1,43 @@
+[versions]
+kotlin = "2.3.20"
+kotlinx-coroutines = "1.10.2"
+slf4j = "2.0.17"
+junit-jupiter = "6.0.3"
+assertk = "0.28.1"
+kotlinx-datetime = "0.7.1"
+# plugins
+sollecitom-gradle-plugins = "1.0.0-SNAPSHOT"
+sollecitom-swissknife = "1.0.0-SNAPSHOT"
+palantir-git-plugin = "5.0.0"
+
+[libraries]
+sollecitom-gradle-plugins-base = { module = "sollecitom.gradle-plugins:base", version.ref = "sollecitom-gradle-plugins" }
+sollecitom-gradle-plugins-kotlin-jvm = { module = "sollecitom.gradle-plugins:kotlin-jvm", version.ref = "sollecitom-gradle-plugins" }
+sollecitom-swissknife-kotlin-extensions = { module = "sollecitom.swissknife:kotlin-extensions", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-core-domain = { module = "sollecitom.swissknife:core-domain", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-core-utils = { module = "sollecitom.swissknife:core-utils", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-core-test-utils = { module = "sollecitom.swissknife:core-test-utils", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-ddd-domain = { module = "sollecitom.swissknife:ddd-domain", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-ddd-test-utils = { module = "sollecitom.swissknife:ddd-test-utils", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-correlation-core-domain = { module = "sollecitom.swissknife:correlation-core-domain", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-correlation-core-test-utils = { module = "sollecitom.swissknife:correlation-core-test-utils", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-messaging-domain = { module = "sollecitom.swissknife:messaging-domain", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-messaging-test-utils = { module = "sollecitom.swissknife:messaging-test-utils", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-service-domain = { module = "sollecitom.swissknife:service-domain", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-logger-core = { module = "sollecitom.swissknife:logger-core", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-logging-standard-slf4j-configuration = { module = "sollecitom.swissknife:logging-standard-slf4j-configuration", version.ref = "sollecitom-swissknife" }
+sollecitom-swissknife-test-utils = { module = "sollecitom.swissknife:test-utils", version.ref = "sollecitom-swissknife" }
+kotlinx-coroutines-bom = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-bom", version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test" }
+kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinx-datetime" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+junit-jupiter-api = { module = "org.junit.jupiter:junit-jupiter-api", version.ref = "junit-jupiter" }
+junit-jupiter-params = { module = "org.junit.jupiter:junit-jupiter-params", version.ref = "junit-jupiter" }
+junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", version.ref = "junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version.ref = "junit-jupiter" }
+assertk = { module = "com.willowtreeapps.assertk:assertk", version.ref = "assertk" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+com-palantir-git-version = { id = "com.palantir.git-version", version.ref = "palantir-git-plugin" }
