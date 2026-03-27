@@ -27,44 +27,12 @@ fun includeProject(name: String) {
 
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 
-// Core aggregate domain
-module("aggregate", "domain")
-module("aggregate", "test", "utils")
-module("aggregate", "test", "specification")
+// Kotlin SDK
+module("sdk", "kotlin", "api")
+module("sdk", "kotlin", "test", "specification")
+module("sdk", "kotlin", "in-memory", "tests")
 
-// Event store
-module("event-store", "domain")
-module("event-store", "test", "utils")
-module("event-store", "test", "specification")
-module("event-store", "in-memory", "implementation")
-module("event-store", "in-memory", "tests")
-
-// Recovery store (snapshots)
-module("recovery-store", "domain")
-module("recovery-store", "test", "utils")
-module("recovery-store", "test", "specification")
-module("recovery-store", "in-memory", "implementation")
-module("recovery-store", "in-memory", "tests")
-
-// Aggregate repository (orchestrates load/decide/persist)
-module("aggregate-repository", "domain")
-module("aggregate-repository", "test", "utils")
-module("aggregate-repository", "test", "specification")
-module("aggregate-repository", "default", "implementation")
-module("aggregate-repository", "default", "tests")
-
-// Projection (materialized views)
-module("projection", "domain")
-module("projection", "test", "utils")
-module("projection", "test", "specification")
-module("projection", "in-memory", "implementation")
-module("projection", "in-memory", "tests")
-
-// Command gateway (sync request-reply at the boundary)
-module("command-gateway", "domain")
-module("command-gateway", "test", "specification")
-module("command-gateway", "local", "implementation")
-module("command-gateway", "local", "tests")
-
-// Integration tests (end-to-end wiring)
-module("integration", "tests")
+// Framework
+module("framework", "api")
+module("framework", "implementation", "in-memory")
+module("framework", "connector", "embedded")
