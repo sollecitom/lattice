@@ -1,3 +1,8 @@
+plugins {
+    id("sollecitom.kotlin-library-conventions")
+    id("sollecitom.maven-publish-conventions")
+}
+
 dependencies {
     testImplementation(projects.sdkKotlinTestSpecification)
     testImplementation(projects.sdkKotlinApi)
