@@ -6,6 +6,8 @@ plugins {
 
 rootProject.name = "lattice"
 
+includeBuild("../gradle-plugins")
+
 fun module(vararg pathSegments: String) = subProject(rootFolder = "modules", pathSegments = pathSegments)
 
 fun subProject(rootFolder: String, vararg pathSegments: String, excludeRootFolderFromGroupName: Boolean = true) {
