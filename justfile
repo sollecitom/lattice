@@ -1,5 +1,7 @@
 #!/usr/bin/env just --justfile
 
+set quiet
+
 push:
     git add -A && (git diff --quiet HEAD || git commit -am "WIP") && git push origin main
 
