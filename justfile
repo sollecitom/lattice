@@ -21,7 +21,7 @@ rebuild:
     ./gradlew clean build --refresh-dependencies --rerun-tasks
 
 publish:
-    ./gradlew publishToMavenLocal
+    ./gradlew --no-configuration-cache publishToMavenLocal
 
 update-dependencies:
     ./gradlew versionCatalogUpdate
