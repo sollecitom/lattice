@@ -1,8 +1,8 @@
 [versions]
-kotlin = "2.4.0"
+kotlin = "2.4.10"
 kotlinx-coroutines = "1.11.0"
 slf4j = "2.0.18"
-junit-jupiter = "6.1.1"
+junit-jupiter = "6.1.2"
 assertk = "0.28.1"
 kotlinx-datetime = "0.8.0"
 # plugins
