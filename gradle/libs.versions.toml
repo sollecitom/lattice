@@ -6,8 +6,8 @@ junit-jupiter = "6.1.2"
 assertk = "0.28.1"
 kotlinx-datetime = "0.8.0"
 # plugins
-sollecitom-gradle-plugins = "1.0.19"
-sollecitom-swissknife = "1.0.10"
+sollecitom-gradle-plugins = "1.0.21"
+sollecitom-swissknife = "1.0.11"
 palantir-git-plugin = "5.0.0"
 
 [libraries]
