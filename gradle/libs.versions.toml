@@ -45,3 +45,4 @@ sollecitom-aggregate-test-metrics-conventions = { id = "sollecitom.aggregate-tes
 sollecitom-dependency-update-conventions = { id = "sollecitom.dependency-update-conventions", version.ref = "sollecitom-gradle-plugins" }
 sollecitom-kotlin-library-conventions = { id = "sollecitom.kotlin-library-conventions", version.ref = "sollecitom-gradle-plugins" }
 sollecitom-maven-publish-conventions = { id = "sollecitom.maven-publish-conventions", version.ref = "sollecitom-gradle-plugins" }
+sollecitom-publish-changed-conventions = { id = "sollecitom.publish-if-changed-conventions", version.ref = "sollecitom-gradle-plugins" }

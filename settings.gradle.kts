@@ -43,12 +43,8 @@ fun includeProject(name: String) {
 
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 
-// Kotlin SDK
-module("sdk", "kotlin", "api")
-module("sdk", "kotlin", "test", "specification")
-module("sdk", "kotlin", "in-memory", "tests")
+// Types a consuming company would define. Must compile without importing the framework.
+module("company-stubs")
 
-// Framework
-module("framework", "api")
-module("framework", "implementation", "in-memory")
-module("framework", "connector", "embedded")
+// Drives the framework design outside-in, from a developer's perspective.
+module("usage-example")

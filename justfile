@@ -21,7 +21,7 @@ generate-sbom:
     bash ../scripts/run-generate-sbom.sh lattice
 
 cleanup:
-    bash ../scripts/cleanup-maven-local.sh --repo-root . --keep 2 --max-age-days 14
+    bash ../scripts/cleanup-maven-local.sh --repo-root . --keep 5 --max-age-days 30
 
 update-internal-dependencies:
     bash ../scripts/update-internal-catalog-versions.sh .
@@ -30,7 +30,7 @@ rebuild:
     ./gradlew clean build --refresh-dependencies --rerun-tasks
 
 publish:
-    ./gradlew --no-configuration-cache publishToMavenLocal
+    bash ../scripts/publish-if-changed.sh
 
 update-dependencies:
     ./gradlew versionCatalogUpdate
