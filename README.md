@@ -9,8 +9,8 @@ outside-in from developer-facing tests; the framework gets extracted from that o
 shape worth generalising.
 
 Design discussion, decisions, and open questions live in
-[`../events-framework.md`](../events-framework.md) in the workspace root. That is the source of truth —
-this README stays short deliberately.
+[`events-framework.md`](events-framework.md). That is the source of truth — this README stays short
+deliberately.
 
 > An earlier exploration under this name (SDK/framework/connector split, `Fact` hierarchy, in-memory
 > engine) was removed rather than continued. Its ideas are recorded under *Prior art: lattice* in the
