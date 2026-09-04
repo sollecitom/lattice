@@ -1,13 +1,13 @@
 [versions]
 kotlin = "2.4.10"
 kotlinx-coroutines = "1.11.0"
-slf4j = "2.0.18"
+slf4j = "2.0.19"
 junit-jupiter = "6.1.3"
 assertk = "0.28.1"
 kotlinx-datetime = "0.8.0"
 # plugins
 sollecitom-gradle-plugins = "1.0.27"
-sollecitom-swissknife = "1.0.26"
+sollecitom-swissknife = "1.0.27"
 palantir-git-plugin = "5.1.0"
 
 [libraries]
