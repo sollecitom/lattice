@@ -51,8 +51,12 @@ Company-agnostic. Depends on swissknife only, never pillar.
 | D27 | Hydration uses a **derived recovery store** (snapshots), in shared storage, keyed by aggregate id. |
 | D28 | **Prescriptive about mechanism. Permissive about shape.** |
 | D29 | Two modules: generic **`core`** (no dependencies) and opinionated **`starter`** built only on core's public API. |
-| D30 | The **test-domain module must compile without importing the framework** — genericity enforced by the compiler, not by discipline. |
+| D30 | The test-domain module must import **`core` and nothing else** — no swissknife, no adapters. *(Weakened from "must compile without importing the framework", which D32 makes unachievable.)* |
 | D31 | The **in-memory implementation must be semantically faithful** — real partitions, positions, per-key ordering, replay. Not a mock. |
+| D32 | **Approach A.** Domain types implement framework interfaces; `Fact`/`Instruction`/`Event`/`Command`/`Query` are framework-owned. |
+| D33 | **Exactly one owner answers for a command.** Ambiguous command bindings are rejected at registration. Events stay fan-out. |
+| D34 | **Markers vs domain events is a type distinction**, so `apply(state, event)` cannot receive something replay must skip. |
+| D35 | The log entry for a submitted command is **`CommandReceived`** — "accept"/"reject" is reserved for the owner's verdict. |
 
 ---
 
@@ -61,10 +65,30 @@ Company-agnostic. Depends on swissknife only, never pillar.
 ```
 Fact
 ├── Event                     ← the only thing aggregates consume or produce
+│   ├── domain events         ← replay APPLIES these
+│   └── markers               ← replay SKIPS these
+│       ├── CommandReceived
+│       └── CommandRejected
 └── Instruction
     ├── Command               ← always wrapped as CommandReceived : Event
     └── Query<ANSWER>         ← wrapped as QueryReceived, on its own topic
 ```
+
+Framework-owned, implemented by domain types (D32).
+
+### Markers are a type distinction, not a flag (D34)
+
+Only **one** category distinction earns its place, and it is *does replay apply this?* Everything else
+you might reach for is metadata — internal-vs-external is **provenance**, which fact metadata already
+carries, not a new category.
+
+`CommandRejected` sits alongside `CommandReceived`: state did not change, so replay must skip it, but
+the refusal belongs in the audit trail and the outcome relay needs something to publish.
+
+Making it a **type** distinction rather than a boolean means `apply(state, event)` can only ever be
+handed something applicable. Lattice has a literal `// TODO on replay: skip CommandReceived markers` — a
+runtime filter someone has to remember. Making it unrepresentable costs one sealed level and removes the
+whole bug class.
 
 ### Participants (D18)
 
@@ -81,6 +105,248 @@ stalls must not stall derivation.
 
 Consequence of at-least-once plus side effects: **reactors must be idempotent**, or the framework must
 supply outbound idempotency keys. See Q2.
+
+---
+
+## The command boundary: one owner answers, everything else is choreography (D33)
+
+### The problem that forced this
+
+A single `Processed` outcome is a fiction if any number of things can react to `CommandReceived`. The
+reactor set is open — new reactors get added later — so there is no moment at which "the command is
+done", and no single position that represents "the effect".
+
+The fix is to narrow what the outcome *means*, not to remove it:
+
+> **The outcome is the designated owner's verdict.** It does not claim the causal chain completed.
+
+### Why exactly one owner, and why that isn't orchestration
+
+**Orchestration is about knowledge, not cardinality.** An orchestrator knows its participants and
+sequences them — "call inventory, then payment, and if payment fails, release the inventory". The
+workflow lives in the coordinator.
+
+A command owner knows none of that. It receives a fact, checks its own invariant, emits a fact. It calls
+nobody, sequences nothing, and cannot tell whether zero or fifty things react to what it emitted. Adding
+a fraud checker tomorrow requires no change to it and it will never know.
+
+The distinguishing test: **does the deciding component know about downstream participants?**
+Orchestration says yes. One-owner-per-command says no. "Exactly one owner" states *where an invariant
+lives*, not who tells whom to do what.
+
+**Why one and not several — rejection is only meaningful if it prevents the effect.** Take
+`Withdraw(account=A, amount=500)` handled by both account A and a `FraudCheck` aggregate:
+
+- A evaluates `balance >= 500`, accepts, writes `Withdrawn`
+- FraudCheck evaluates its own rules, rejects
+
+Different partitions, no shared transaction, so A's write already happened. FraudCheck's "rejection"
+prevented nothing. And the client received two contradictory answers with no basis for preferring
+either.
+
+That is the incoherence, stated precisely: **with multiple deciders, "reject" degrades into "abstain".**
+It stops meaning *this did not happen* and starts meaning *I personally did not participate, but others
+may have*. Every caller then has to reason about partial acceptance, and `Rejected(reason)` becomes a
+lie.
+
+### The seam
+
+```
+submit ──▶ [ one owner decides ] ──▶ CommandReceived ──▶ [ anyone reacts ] ──▶ ...
+           refusable request                              facts
+```
+
+Before the write it is a **request** — refusable, so someone must be responsible for refusing it. That
+is inherently singular. After the write it is a **fact** — facts cannot be refused, so no owner is
+needed and any number of consumers may react, cascade, and produce further events without coordination.
+
+Which is why **D4 is pro-choreography rather than a concession against it**: converting commands to
+events immediately is precisely what creates the zone where choreography is well-defined. Without it,
+commands would float around being multiply-handled with no coherent semantics.
+
+**Choreography starts at `CommandReceived`, not at the result event.** Other things may legitimately
+react to the command event itself — an audit sink, an advisory fraud pre-check. The owner is not
+privileged because it reacts first; it is privileged because **its verdict is the one reported to the
+client**. Everything else consuming that same event is already choreography.
+
+### The rule that falls out
+
+> If several things should act and **none can refuse** — that is an event. Publish it.
+> If **one thing can refuse** — that is a command. One owner.
+
+So the command/event distinction *is* the fan-out distinction. Nobody is forced into single-handling
+when they wanted fan-out; they only have to be honest about whether refusal is possible.
+
+### The multi-invariant case is a saga, and sagas here are choreographed
+
+The strongest objection would be: "withdraw only if balance sufficient **and** not frozen **and** under
+daily limit", with those invariants living in different aggregates. Two answers, neither needing an
+orchestrator:
+
+1. **They are the same aggregate.** If they must hold atomically they are one consistency boundary —
+   that is what aggregate design means.
+2. **It is a multi-step flow.** A accepts provisionally → `WithdrawalRequested` → FraudCheck reacts →
+   `WithdrawalCleared` or `WithdrawalBlocked` → A reacts and finalises or compensates.
+
+Every step in (2) is an event reaction. No component knows the whole flow; each knows only what it
+reacts to and what it emits.
+
+### What it costs
+
+The framework must **detect and reject ambiguous command bindings at registration**. Two aggregates
+binding `Withdraw`, even with different key extractors, becomes a startup error rather than a silent
+fan-out.
+
+Occasionally annoying: if the same command *shape* is genuinely wanted in two places, you need two
+command types, or you reconsider whether it should be an event. The upside is that lattice's silent
+first-match-wins (`commandBindings.find { ... }`) becomes impossible — it currently picks whichever
+aggregate registered first and tells nobody.
+
+---
+
+## Command lifecycle and the client API
+
+### Three identities, three jobs
+
+| | Scope | Generated by | Job |
+|---|---|---|---|
+| **action id** | one user intent | client | idempotency key, namespaced by tenant/customer |
+| **invocation id** | one request | client | the batch envelope — one request may carry several commands |
+| **command id** | one command | framework (client may override) | **reply correlation** |
+
+The command id **is** the occurrence id of the `CommandReceived` record — one submission, one record,
+one identity. The receipt therefore carries both `commandId` (identity) and `position` (location) of the
+same thing.
+
+**Client-specifiable via a defaulted factory argument** — implicit in tests, explicit when a client must
+reattach after a crash:
+
+```kotlin
+fun deposit(accountId: AccountId, amount: Long, id: Id = newId()) = Deposit(id, accountId, amount)
+```
+
+**Keep it orthogonal to dedup.** The command id is *identity*; the action id is the *idempotency key*.
+The framework must not dedup on the command id — reusing one is a client bug, whereas reusing an action
+id is a deliberate retry. Conflating them would let accidental id reuse silently swallow a legitimate
+second command.
+
+### The receipt makes the validation tiers visible in the type system
+
+```kotlin
+sealed interface Receipt {
+    data class Accepted(val commandId: Id, val position: Position) : Receipt {
+        suspend fun verdict(): Verdict
+    }
+    data class Rejected(val reason: String) : Receipt
+}
+
+fun Receipt.acceptedOrThrow(): Receipt.Accepted = when (this) {
+    is Receipt.Accepted -> this
+    is Receipt.Rejected -> throw CommandRejectedException(reason)
+}
+```
+
+The two rejection kinds are **different types, not one type with different reasons**, because their
+consequences differ:
+
+- **Synchronous rejection** (tiers 1–2: structural, permissions, integrity) — nothing was written. Safe
+  to retry a corrected command freely. This is D6 expressed in the API rather than in a comment.
+- **Asynchronous refusal** (tier 3: the owner's invariants) — the attempt is journaled and permanently
+  part of history.
+
+`verdict()` lives on `Accepted` rather than being an extension: only accepted commands have verdicts, so
+the type carries it. Tell-don't-ask applies cleanly here because `Accepted` is a framework type — no
+prescription cost. Two extensions at most; `receipt.acceptedOrThrow().verdict()` is the whole ergonomic
+story.
+
+### Two positions, arriving at different times — and a trap
+
+| | Available | Meaning |
+|---|---|---|
+| `Accepted.position` | **immediately** | where `CommandReceived` landed |
+| `Verdict.Accepted.position` | after the owner decides | where the **result event** landed |
+
+The immediate one is valuable on its own: a durable "your request is recorded at P" that is meaningful
+even if the client never awaits. That is the real payoff of async submission.
+
+> **Trap: the acceptance position is not sufficient for read-your-own-writes.** It looks like it should
+> be. The effect is written at a *higher* offset in the same partition, so a read model that has consumed
+> past P1 may not have seen P2. Passing the acceptance position to `atLeast` yields a test that passes
+> most of the time.
+
+This deserves to be written down because it is exactly the kind of thing that gets "optimised" into
+place later by someone who notices they can skip the await.
+
+### Verdict as the primitive, reactions as sugar
+
+```kotlin
+sealed interface Verdict {
+    data class Accepted(val events: List<Event>, val position: Position) : Verdict
+    data class Refused(val reason: String) : Verdict
+}
+
+suspend fun awaitVerdict(): Verdict                                          // primitive — decidable
+suspend inline fun <reified T : Event> Receipt.Accepted.awaitReaction(): T   // sugar
+```
+
+The owner produces exactly one verdict, so **once it lands the framework knows the owner's contribution
+is complete**. `awaitReaction<T>()` therefore throws immediately when the verdict arrives without a `T`,
+rather than hanging until a timeout — a strictly better failure than any type bound would have bought.
+
+**Scope discipline:** `awaitReaction` means *the owner's reaction*, not "any reaction anywhere". That is
+what makes fast-fail possible. Awaiting a **downstream** reaction — another aggregate reacting to your
+event — is genuinely undecidable, since the reactor set is open. If ever wanted it needs a separate,
+explicitly timeout-bounded API, and it can offer neither guarantee. The naming must keep the two apart
+so nobody expects the second from the first.
+
+### Two-layer SDK: framework SDK, then domain SDK
+
+Command→event causality is **domain knowledge**. The framework cannot know that a deposit results in
+`DepositProcessed`, so encoding it in framework generics was always trying to make the framework hold
+knowledge it does not have. A domain SDK holds it natively:
+
+```kotlin
+// company SDK — knows the domain, built on the framework SDK
+class Accounts(private val lattice: Lattice) {
+    suspend fun deposit(accountId: AccountId, amount: Long): DepositProcessed =
+        lattice.submit(Deposit(accountId, amount))
+               .acceptedOrThrow()
+               .awaitReaction<DepositProcessed>()
+}
+```
+
+Client code becomes `accounts.deposit(id, 100)` — no type parameter to supply, so none to get wrong.
+
+**This settles the type-bound question.** `awaitReaction<T>()` stops being application-facing: it is
+called once per business operation, in one file, by whoever defined the operation — the person least
+likely to name the wrong event and most likely to notice immediately. The risk is concentrated rather
+than scattered, and the runtime fast-fail covers it.
+
+**The stronger reason to build it: it is a sharper test of the framework API than the tests are.** Tests
+can quietly work around an awkward API — you write whatever incantation makes the assertion pass. An SDK
+layer cannot; it has to wrap the framework *cleanly enough for someone else to use*, which surfaces
+friction the tests would absorb silently. If `Accounts.deposit()` comes out ugly, the framework API is
+wrong. It is also a second consumer, for the same reason two broker adapters beat one.
+
+**Two guardrails:**
+
+- **The domain SDK must not become an orchestrator.** If `transfer()` awaits step 1, submits step 2,
+  awaits step 3, that is client-side orchestration wearing an SDK costume — and it breaks the moment the
+  client dies mid-flow. The SDK's job is to *name* a business operation and know what to await.
+  Sequencing stays in the system, choreographed.
+- **Be explicit about await scope.** Owner-scoped waits are decidable and fail fast; downstream waits
+  need a timeout and cannot. Those should look different in the SDK.
+
+**Module shape:**
+
+| Module | Contains | Imports |
+|---|---|---|
+| `company-stubs` | domain facts, context, identity — pure data | `core` only (D30) |
+| `company-sdk` | business operations — `Accounts.deposit(...)` | framework SDK + stubs |
+| `usage-example` | tests written the way a real client would write them | `company-sdk` |
+
+Keeps D30 clean: stubs stay data, framework usage lives one layer up. Built lazily — one module, one
+`deposit()`, growing as the tests do.
 
 ---
 
@@ -191,7 +457,52 @@ object is harder to get wrong than one passed alongside it. Identity stays attac
 identifies. And behaviour belongs on objects, which have lifecycles that can hold caches — though that
 last point is satisfiable under B too, by grouping extractors into `fun interface`s.
 
-*Not decided. Prototype both against the test-domain module in phase 1 and pick.*
+### Resolved: Approach A (D32)
+
+**Decision: domain types implement framework interfaces.** The `Fact`/`Instruction`/`Event`/`Command`/
+`Query` hierarchy is framework-owned; capabilities arrive as interface members where they fit.
+
+Rationale, in the user's words: *"I don't care about no dependency on framework. I'm happy with
+interfaces the framework provides and expect to be implemented."*
+
+What this costs and settles:
+
+- **D30 weakens.** "The test-domain module must compile without importing the framework" becomes
+  unachievable, because `Deposit : Command` *is* a framework import. It degrades to "imports `core` and
+  nothing else" — still meaningful (it stops swissknife and adapter types leaking into domain code) but
+  no longer the strongest, compiler-enforced form of the guarantee.
+- **D29 survives unchanged.** `core` still has no dependencies. Domain types now depend on core, which
+  is precisely the point.
+- **`Record<EVT>` is unnecessary.** It existed only to keep a framework supertype off domain events. The
+  log is `Flow<Event>`.
+- **One thing still doesn't fit the interface shape**, whichever way the fork had gone: the idempotency
+  key spans context *and* fact, so it sits naturally on neither object and remains a supplied function
+  or a separate strategy object.
+
+### Rejected: `Command<out EVENT>` binding the command to its owner's event family
+
+Raised as a way to make `awaitReaction<T>()` type-safe — `Deposit : Command<AccountEvent>` would reject
+`deposit.awaitReaction<ShipmentDispatched>()` at compile time.
+
+Dropped for two reasons:
+
+**Coupling.** The declaration says "whoever owns me emits `AccountEvent`s" — the request type encodes
+its handler's internals. Re-home the command to a different aggregate and the command declaration
+changes. In a choreographic design the request should be ignorant of who answers it.
+
+**It's a strict subset of what runtime already catches.** Because the owner's verdict is decidable (see
+below), the framework knows exactly which events a command produced the moment the verdict lands:
+
+| | Wrong family (`ShipmentDispatched`) | Right family, wrong event (`Withdrawn`) |
+|---|---|---|
+| Type bound | compile error | compiles, then **hangs** |
+| Verdict fast-fail | immediate, clear error | immediate, clear error |
+
+The bound pays coupling for redundancy, and leaves the worse failure mode (a hang) uncovered.
+
+**What is given up:** `awaitVerdict()` returns `List<Event>` rather than `List<AccountEvent>`, so no
+exhaustive `when` over the family directly from the verdict. That was the one real argument for keeping
+it, and it's largely mooted by the SDK layering below — application code doesn't call `awaitVerdict()`.
 
 ### Behaviour vs data vs lookup
 
@@ -991,6 +1302,103 @@ reflective linear scan per message with silent first-match-wins.
 
 ---
 
+## The first test
+
+### The governing property
+
+**It must be impossible to pass by accident.** That is the trap the old lattice fell into: a synchronous
+in-memory engine made its one test green while proving nothing about ordering, positions, or replay.
+D31 exists because of it. Every choice below follows from this.
+
+### Shape
+
+```kotlin
+val receipt = lattice.submit(deposit(accountId, 100))   // Accepted(commandId, P1) | Rejected(reason)
+val accepted = receipt.acceptedOrThrow()
+val event    = accepted.awaitReaction<DepositProcessed>()          // owner's verdict, position P2
+val answer   = lattice.query(GetBalance(accountId), atLeast = P2)  // Answered(100, at = P3), P3 >= P2
+```
+
+### Deposit, not Withdraw
+
+Deposit has no precondition, so **test 1 has no rejection path at all**. Withdraw-against-insufficient-
+balance becomes test 2, where rejection is the point rather than an incidental branch.
+
+### Three registrations, and the query must not go to the aggregate
+
+- **Aggregate** — `handle(state, Deposit) → DepositProcessed`, `apply(state, event) → state`. Owns the
+  invariant.
+- **Read model** — `apply(state, event) → state`, `answer(state, GetBalance) → Long`.
+
+The query goes to the **read model**. If it went to the aggregate the test would not exercise CQRS at
+all, and the write/read split is the thing under test. Both consume the same event, for different
+reasons — so the event-handler registration is doing real work rather than being ceremony.
+
+### Asserting history is the most valuable assertion
+
+It makes D4 *observable* rather than assumed:
+
+```
+[ CommandReceived(Deposit(100))     @ P1,
+  DepositProcessed(100, 100)        @ P2 ]
+
+P1 == receipt.position
+P2 == verdict.position
+P2 >  P1
+```
+
+Every position claim is checkable and nothing rests on timing.
+
+### How we know propagation happened
+
+`atLeast(P2)` on the query — the effect position from the verdict, never the acceptance position (see
+the trap above). Deterministic; no sleeps, no polling, and the mechanism under test is the mechanism
+being used.
+
+**`atLeast` should be required but explicitly waivable** — `atLeast = Position.Unconstrained` rather
+than a defaulted parameter. You cannot *forget* it, you can only *decide*. The failure mode of
+forgetting is a test that is green nine times in ten, or a UI that silently goes backwards in
+production.
+
+### Make the in-memory implementation asynchronous on purpose
+
+If the read model applies events synchronously inside `submit`, `atLeast` is a no-op and the test stays
+green with the entire RYOW mechanism deleted. So the in-memory read model runs on **its own coroutine**
+and genuinely lags.
+
+### Test 1b — the adversarial companion
+
+Everything above still passes if `atLeast` is a no-op and the projection merely happens to be fast. The
+fix is a **test-controllable scheduler**:
+
+1. hold the projection at P1
+2. submit the query with `atLeast = P2` — assert it has **not** completed
+3. release the projection to P2
+4. assert it completes with the right answer
+
+That proves RYOW rather than observing it, and the same lever serves rebalance, lag, and replay tests
+later. Written as 1b rather than folded into 1, so test 1 stays a readable end-to-end example.
+
+### Deliberately out of scope
+
+No HTTP (same process), no broker, no audit stream, no dedup, no cascade, no snapshots, no action or
+invocation ids. One aggregate, one read model, one partition per key.
+
+Dropping action/invocation ids means the **receipt itself is the correlation handle** — which works
+in-process and defers exactly one thing: the receipt is not restart-durable, so a client that dies
+cannot reattach. When CTX arrives the invocation id becomes the durable key and the receipt becomes a
+thin wrapper over it. The API shape must not assume in-process.
+
+### Still open for test 1
+
+- **Does `query` block or fail when the floor cannot be met within a timeout?** Blocking is friendlier;
+  `Stale(currentPosition)` is more honest and lets the caller decide. Probably a per-query policy
+  eventually — for test 1, blocking with a generous timeout is the least surface.
+- **Naming for the outcome level.** `Receipt.Accepted` (edge) and `Verdict.Accepted` (owner) both use
+  "accepted", and `Decision.Accept` is a third. Three levels need three distinguishable words.
+
+---
+
 ## Open — needs a decision
 
 **Q1 — serialization. Still the blocker.**
@@ -1054,8 +1462,8 @@ growth is measurable.
 
 | Phase | Content | Proves |
 |---|---|---|
-| 0 | Resolve Q1. Repo skeleton: `core` (no deps) + `starter` + test-domain module. | D29, D30 |
-| 1 | Core model, three participants, **semantically faithful** in-memory implementation, contract test spec. Prototype capability Approach A vs B and pick. No broker, no HTTP. | D3, D4, D5, D18, D19, D28, D31 |
+| 0 | Resolve Q1. Repo skeleton: `core` (no deps) + `starter` + `company-stubs` + `company-sdk` + `usage-example`. | D29, D30, D32 |
+| 1 | **Test 1 + 1b** (see above): core model, three participants, submit/receipt/verdict, one aggregate, one read model, RYOW via `atLeast`, history assertion. Semantically faithful in-memory implementation with a controllable scheduler. No broker, no HTTP. | D3, D4, D5, D18, D19, D28, D31, D33, D34, D35 |
 | 2 | HTTP surface derived from registrations + OpenAPI. Tiers 1–2 at the edge. | D1, D2, D6, D7 |
 | 3 | Request-reply: durable outcome store, three modes, outcome-as-event + relay. | D8, D20 |
 | 4 | Broker port + conformance suite + **Pulsar and Kafka-API together** + `provision`. Schema registry, `FULL_TRANSITIVE`, upcasting. | D10, D15, D23, D24, D25 |
