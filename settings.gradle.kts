@@ -43,8 +43,15 @@ fun includeProject(name: String) {
 
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 
-// Types a consuming company would define. Must compile without importing the framework.
-module("company-stubs")
+// The framework.
+module("framework", "core")
+module("framework", "in-memory")
+module("framework", "test", "utils")
 
-// Drives the framework design outside-in, from a developer's perspective.
+// What a consuming company would write. Depends on the framework, never the reverse.
+module("company", "domain")
+module("company", "sdk")
+module("company", "test", "utils")
+
+// Drives the design outside-in, from a developer's perspective.
 module("usage-example")
