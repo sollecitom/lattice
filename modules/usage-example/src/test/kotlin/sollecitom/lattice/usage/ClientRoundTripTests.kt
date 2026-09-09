@@ -63,9 +63,9 @@ class ClientRoundTripTests {
             val command = account.deposit(amount = 250)
             val accepted = lattice.submit(command).acceptedOrThrow()
 
-            val commandReceivedEvent = lattice.history(key = account.key).first()
+            val commandReceived = lattice.history(key = account.key).first()
 
-            assertThat(commandReceivedEvent).isEqualTo(command.recordedAsReceivedAt(accepted.position))
+            assertThat(commandReceived).isEqualTo(command.recordedAsReceivedAt(accepted.position))
         }
 
         // TODO review
