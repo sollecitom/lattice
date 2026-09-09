@@ -54,6 +54,7 @@ class ClientRoundTripTests {
             assertThat(processed).wasRecordedAfter(accepted)
         }
 
+        // TODO review
         @Test
         fun `the log holds the command as a fact, then its result`() = bankingTest { lattice ->
 
@@ -71,6 +72,7 @@ class ClientRoundTripTests {
             assertThat(history.map { it.position }).containsExactly(accepted.position, processed.position)
         }
 
+        // TODO review
         @Test
         fun `awaiting an event the owner never produced fails immediately, naming what was produced`() = bankingTest { lattice ->
 
@@ -81,6 +83,7 @@ class ClientRoundTripTests {
                 .messageContains("DepositProcessed")
         }
 
+        // TODO review
         @Test
         fun `a command nobody owns is rejected`() = bankingTest { lattice ->
 
@@ -95,6 +98,7 @@ class ClientRoundTripTests {
     @TestInstance(PER_CLASS)
     inner class ReadingYourOwnWrites {
 
+        // TODO review
         @Test
         fun `a query constrained to the effect position sees the write`() = bankingTest { lattice ->
 
@@ -108,6 +112,7 @@ class ClientRoundTripTests {
             assertThat(balance).sawAtLeast(processed)
         }
 
+        // TODO review
         @Test
         fun `a constrained query does not answer until the read model catches up`() {
 
