@@ -7,8 +7,36 @@ import assertk.assertions.isNull
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS
+import assertk.assertions.messageContains
+import sollecitom.lattice.core.MAX_ROUTING_KEY_LENGTH
 import sollecitom.lattice.core.distanceToOrNull
+import sollecitom.lattice.core.validRoutingKey
 import sollecitom.libs.swissknife.test.utils.assertions.failedThrowing
+
+@TestInstance(PER_CLASS)
+class RoutingKeyTests {
+
+    @Test
+    fun `refuses a blank key, which would collapse every instance onto one partition`() {
+
+        assertThat(runCatching { validRoutingKey("  ", "commandKey of 'account'") })
+            .failedThrowing<IllegalArgumentException>()
+            .messageContains("account")
+    }
+
+    @Test
+    fun `refuses an oversized key`() {
+
+        assertThat(runCatching { validRoutingKey("x".repeat(MAX_ROUTING_KEY_LENGTH + 1), "eventKey") })
+            .failedThrowing<IllegalArgumentException>()
+    }
+
+    @Test
+    fun `passes an ordinary key through`() {
+
+        assertThat(validRoutingKey("acc-1", "commandKey")).isEqualTo("acc-1")
+    }
+}
 
 @TestInstance(PER_CLASS)
 class InMemoryPositionTests {

@@ -2,11 +2,13 @@ package sollecitom.lattice.usage
 
 import assertk.assertThat
 import assertk.assertions.containsExactly
+import assertk.assertions.hasSize
 import assertk.assertions.isEqualTo
 import assertk.assertions.isInstanceOf
 import assertk.assertions.isNull
 import assertk.assertions.messageContains
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.Nested
@@ -25,11 +27,11 @@ import sollecitom.lattice.core.CommandRejectedException
 import sollecitom.lattice.core.DomainEvent
 import sollecitom.lattice.core.Freshness
 import sollecitom.lattice.core.Id
-import sollecitom.lattice.core.Marker
 import sollecitom.lattice.core.NoSuchReactionException
 import sollecitom.lattice.core.acceptedOrThrow
 import sollecitom.lattice.core.awaitReaction
 import sollecitom.lattice.inmemory.ManualProjectionScheduler
+import sollecitom.lattice.test.utils.recordedAsReceivedAt
 import sollecitom.lattice.test.utils.sawAtLeast
 import sollecitom.lattice.test.utils.wasRecordedAfter
 import sollecitom.libs.swissknife.test.utils.assertions.failedThrowing
@@ -54,22 +56,56 @@ class ClientRoundTripTests {
             assertThat(processed).wasRecordedAfter(accepted)
         }
 
-        // TODO review
         @Test
-        fun `the log holds the command as a fact, then its result`() = bankingTest { lattice ->
+        fun `accepted commands are recorded as facts`() = bankingTest { lattice ->
 
             val account = Account.withRandomId()
             val command = account.deposit(amount = 250)
-
             val accepted = lattice.submit(command).acceptedOrThrow()
+
+            val commandReceivedEvent = lattice.history(key = account.key).first()
+
+            assertThat(commandReceivedEvent).isEqualTo(command.recordedAsReceivedAt(accepted.position))
+        }
+
+        // TODO review
+        @Test
+        fun `history after a position excludes it`() = bankingTest { lattice ->
+
+            val account = Account.withRandomId()
+
+            val accepted = lattice.submit(account.deposit(amount = 250)).acceptedOrThrow()
+            val processed = accepted.awaitReaction<DepositProcessed>()
+
+            assertThat(lattice.history(account.key, after = accepted.position).toList())
+                .containsExactly(processed)
+        }
+
+        // TODO review
+        @Test
+        fun `history through a position includes it`() = bankingTest { lattice ->
+
+            val account = Account.withRandomId()
+
+            val accepted = lattice.submit(account.deposit(amount = 250)).acceptedOrThrow()
+            accepted.awaitReaction<DepositProcessed>()
+
+            assertThat(lattice.history(account.key, through = accepted.position).toList())
+                .hasSize(1)
+        }
+
+        // TODO review
+        @Test
+        fun `the log holds the resulting event, and nothing else`() = bankingTest { lattice ->
+
+            val account = Account.withRandomId()
+
+            val accepted = lattice.submit(account.deposit(amount = 250)).acceptedOrThrow()
             val processed = accepted.awaitReaction<DepositProcessed>()
             val history = lattice.history(account.key).toList()
 
-            assertThat(history.map { it.value }).containsExactly(
-                Marker.CommandReceived(commandId = command.id, command = command),
-                processed.value,
-            )
-            assertThat(history.map { it.position }).containsExactly(accepted.position, processed.position)
+            assertThat(history).hasSize(2)
+            assertThat(history.last()).isEqualTo(processed)
         }
 
         // TODO review

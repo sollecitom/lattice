@@ -21,8 +21,8 @@ class InMemoryLatticeEnvironment(
         type: String,
         aggregate: Aggregate<COMMAND, EVENT, STATE>,
         commandType: KClass<COMMAND>,
-        commandKey: (COMMAND) -> Id,
-        eventKey: (EVENT) -> Id,
+        commandKey: (COMMAND) -> String,
+        eventKey: (EVENT) -> String,
     ) {
         check(!started) { "cannot register '$type' after start()" }
         aggregates.firstOrNull { it.commandType == commandType }?.let {
@@ -32,8 +32,8 @@ class InMemoryLatticeEnvironment(
         aggregates += RegisteredAggregate(
             type = type,
             commandType = commandType,
-            commandKey = commandKey as (Command) -> Id,
-            eventKey = eventKey as (DomainEvent) -> Id,
+            commandKey = { validRoutingKey((commandKey as (Command) -> String)(it), "commandKey of '$type'") },
+            eventKey = { validRoutingKey((eventKey as (DomainEvent) -> String)(it), "eventKey of '$type'") },
             initialState = aggregate.initialState,
             decide = { state, command -> aggregate.decide(state as STATE, command as COMMAND) },
             apply = { state, event -> aggregate.apply(state as STATE, event as EVENT) },
@@ -45,8 +45,8 @@ class InMemoryLatticeEnvironment(
         readModel: ReadModel<EVENT, STATE, QUERY>,
         eventType: KClass<EVENT>,
         queryType: KClass<QUERY>,
-        eventKey: (EVENT) -> Id,
-        queryKey: (QUERY) -> Id,
+        eventKey: (EVENT) -> String,
+        queryKey: (QUERY) -> String,
     ) {
         check(!started) { "cannot register '$name' after start()" }
         @Suppress("UNCHECKED_CAST")
@@ -54,7 +54,7 @@ class InMemoryLatticeEnvironment(
             name = name,
             eventType = eventType,
             queryType = queryType,
-            queryKey = queryKey as (Query<*>) -> Id,
+            queryKey = { validRoutingKey((queryKey as (Query<*>) -> String)(it), "queryKey of '$name'") },
             initialState = readModel.initialState as Any,
             apply = { state, event -> readModel.apply(state as STATE, event as EVENT) as Any },
             answer = { state, query -> readModel.answer(state as STATE, query) },
@@ -117,7 +117,7 @@ private class RunningLattice(
         val verdict = CompletableDeferred<Verdict>()
         pendingMutex.withLock { pending[command.id] = verdict }
 
-        val position = log.append(owner.commandKey(command), Marker.CommandReceived(command.id, command))
+        val position = log.append(owner.commandKey(command), CommandReceived(command.id, command))
         return AcceptedReceipt(command.id, position, verdict)
     }
 
@@ -131,16 +131,16 @@ private class RunningLattice(
         return Answered(readModel.answer(query), readModel.appliedThrough(partition))
     }
 
-    override fun history(key: Id): Flow<Recorded<Event>> = log.history(key)
+    override fun history(key: String, after: Position?, through: Position?): Flow<Recorded<Event>> = log.history(key, after, through)
 
     override suspend fun stop() = scope.cancel()
 
     private suspend fun runAggregate(registered: RegisteredAggregate, partition: Int) {
-        val states = mutableMapOf<Id, Any?>()
+        val states = mutableMapOf<String, Any?>()
         log.stream(partition).collect { recorded ->
             val event = recorded.value
             when (event) {
-                is Marker.CommandReceived -> {
+                is CommandReceived -> {
                     if (!registered.commandType.isInstance(event.command)) return@collect
                     val key = registered.commandKey(event.command)
                     val state = states.getOrPut(key) { registered.initialState }
@@ -150,12 +150,12 @@ private class RunningLattice(
                             complete(event.commandId, Verdict.Applied(listOf(Recorded(decision.event, at))))
                         }
                         is Decision.Reject -> {
-                            log.append(key, Marker.CommandRejected(event.commandId, decision.reason))
+                            log.append(key, CommandRejected(event.commandId, decision.reason))
                             complete(event.commandId, Verdict.Refused(decision.reason))
                         }
                     }
                 }
-                is Marker.CommandRejected -> Unit
+                is CommandRejected -> Unit
                 is DomainEvent -> {
                     val key = registered.eventKey(event)
                     states[key] = registered.apply(states.getOrPut(key) { registered.initialState }, event)
@@ -181,13 +181,16 @@ private class PartitionedLog(private val partitionCount: Int) {
 
     private val partitions = List(partitionCount) { Partition(it) }
 
-    fun partitionFor(key: Id): Int = key.value.hashCode().absoluteValue % partitionCount
+    fun partitionFor(key: String): Int = key.hashCode().absoluteValue % partitionCount
 
-    suspend fun append(key: Id, event: Event): Position = partitions[partitionFor(key)].append(event)
+    suspend fun append(key: String, event: Event): Position = partitions[partitionFor(key)].append(event)
 
     fun stream(partition: Int): Flow<Recorded<Event>> = partitions[partition].stream()
 
-    fun history(key: Id): Flow<Recorded<Event>> = partitions[partitionFor(key)].recorded().asFlow()
+    fun history(key: String, after: Position?, through: Position?): Flow<Recorded<Event>> = partitions[partitionFor(key)]
+        .recorded()
+        .filter { (after == null || it.position > after) && (through == null || it.position <= through) }
+        .asFlow()
 
     private class Partition(private val index: Int) {
 
@@ -212,8 +215,8 @@ private class PartitionedLog(private val partitionCount: Int) {
 private class RegisteredAggregate(
     val type: String,
     val commandType: KClass<out Command>,
-    val commandKey: (Command) -> Id,
-    val eventKey: (DomainEvent) -> Id,
+    val commandKey: (Command) -> String,
+    val eventKey: (DomainEvent) -> String,
     val initialState: Any?,
     val decide: (Any?, Command) -> Decision<DomainEvent>,
     val apply: (Any?, DomainEvent) -> Any?,
@@ -223,7 +226,7 @@ private class RegisteredReadModel(
     val name: String,
     private val eventType: KClass<out DomainEvent>,
     private val queryType: KClass<out Query<*>>,
-    val queryKey: (Query<*>) -> Id,
+    val queryKey: (Query<*>) -> String,
     initialState: Any,
     private val apply: (Any, DomainEvent) -> Any,
     private val answer: (Any, Query<*>) -> Any?,

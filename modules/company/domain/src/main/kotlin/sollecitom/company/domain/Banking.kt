@@ -13,7 +13,7 @@ value class AccountId(val value: String) {
 @JvmInline
 value class Account(val id: AccountId) {
 
-    val key: Id get() = id.key()
+    val key: String get() = id.key()
 
     fun deposit(amount: Long, commandId: Id = Id.random()) = Deposit(id, amount, commandId)
 
@@ -79,4 +79,4 @@ fun LatticeEnvironment.registerBanking() {
     )
 }
 
-internal fun AccountId.key() = Id(value)
+internal fun AccountId.key() = value

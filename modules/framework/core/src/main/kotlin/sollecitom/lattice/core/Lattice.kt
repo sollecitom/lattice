@@ -47,7 +47,7 @@ interface Lattice {
 
     suspend fun <ANSWER> query(query: Query<ANSWER>, atLeast: Freshness): Answered<ANSWER>
 
-    fun history(key: Id): Flow<Recorded<Event>>
+    fun history(key: String, after: Position? = null, through: Position? = null): Flow<Recorded<Event>>
 
     suspend fun stop()
 }
@@ -58,8 +58,8 @@ interface LatticeEnvironment {
         type: String,
         aggregate: Aggregate<COMMAND, EVENT, STATE>,
         commandType: KClass<COMMAND>,
-        commandKey: (COMMAND) -> Id,
-        eventKey: (EVENT) -> Id,
+        commandKey: (COMMAND) -> String,
+        eventKey: (EVENT) -> String,
     )
 
     fun <EVENT : DomainEvent, STATE, QUERY : Query<*>> registerReadModel(
@@ -67,8 +67,8 @@ interface LatticeEnvironment {
         readModel: ReadModel<EVENT, STATE, QUERY>,
         eventType: KClass<EVENT>,
         queryType: KClass<QUERY>,
-        eventKey: (EVENT) -> Id,
-        queryKey: (QUERY) -> Id,
+        eventKey: (EVENT) -> String,
+        queryKey: (QUERY) -> String,
     )
 
     suspend fun start(): Lattice
@@ -77,13 +77,13 @@ interface LatticeEnvironment {
 inline fun <reified COMMAND : Command, EVENT : DomainEvent, STATE> LatticeEnvironment.registerAggregate(
     type: String,
     aggregate: Aggregate<COMMAND, EVENT, STATE>,
-    noinline commandKey: (COMMAND) -> Id,
-    noinline eventKey: (EVENT) -> Id,
+    noinline commandKey: (COMMAND) -> String,
+    noinline eventKey: (EVENT) -> String,
 ) = registerAggregate(type, aggregate, COMMAND::class, commandKey, eventKey)
 
 inline fun <reified EVENT : DomainEvent, STATE, reified QUERY : Query<*>> LatticeEnvironment.registerReadModel(
     name: String,
     readModel: ReadModel<EVENT, STATE, QUERY>,
-    noinline eventKey: (EVENT) -> Id,
-    noinline queryKey: (QUERY) -> Id,
+    noinline eventKey: (EVENT) -> String,
+    noinline queryKey: (QUERY) -> String,
 ) = registerReadModel(name, readModel, EVENT::class, QUERY::class, eventKey, queryKey)
