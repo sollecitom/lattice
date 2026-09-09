@@ -16,13 +16,13 @@ import sollecitom.company.domain.Account
 import sollecitom.company.domain.DepositProcessed
 import sollecitom.company.sdk.Accounts
 import sollecitom.company.test.utils.bankingTest
-import sollecitom.company.test.utils.isResultOf
+import sollecitom.company.test.utils.recordsDeposit
 import sollecitom.company.test.utils.withRandomId
 import sollecitom.lattice.core.Freshness
 import sollecitom.lattice.core.acceptedOrThrow
 import sollecitom.lattice.core.awaitReaction
 import sollecitom.lattice.inmemory.ManualProjectionScheduler
-import sollecitom.lattice.test.utils.recordedAsReceivedAt
+import sollecitom.lattice.test.utils.recordsReceptionOf
 import sollecitom.lattice.test.utils.sawAtLeast
 import sollecitom.lattice.test.utils.wasRecordedAfter
 
@@ -42,11 +42,10 @@ class ClientRoundTripTests {
             val accepted = lattice.submit(command).acceptedOrThrow()
             val processed = accepted.awaitReaction<DepositProcessed>()
 
-            assertThat(processed).isResultOf(command, leavingBalance = 100)
+            assertThat(processed).recordsDeposit(command, leavingBalance = 100)
             assertThat(processed).wasRecordedAfter(accepted)
         }
 
-        // TODO review
         @Test
         fun `an accepted command is in the log before it is processed`() = bankingTest { lattice ->
 
@@ -54,8 +53,9 @@ class ClientRoundTripTests {
             val command = account.deposit(amount = 250)
 
             val accepted = lattice.submit(command).acceptedOrThrow()
+            val commandReceived = lattice.history(account.key).first()
 
-            assertThat(lattice.history(account.key).first()).isEqualTo(command.recordedAsReceivedAt(accepted.position))
+            assertThat(commandReceived).recordsReceptionOf(command, at = accepted.position)
         }
 
         // TODO review

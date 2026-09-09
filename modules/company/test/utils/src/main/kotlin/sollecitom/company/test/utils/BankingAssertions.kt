@@ -7,7 +7,7 @@ import sollecitom.company.domain.Deposit
 import sollecitom.company.domain.DepositProcessed
 import sollecitom.lattice.core.Recorded
 
-fun Assert<Recorded<DepositProcessed>>.isResultOf(command: Deposit, leavingBalance: Long) = given { actual ->
+fun Assert<Recorded<DepositProcessed>>.recordsDeposit(command: Deposit, leavingBalance: Long) = given { actual ->
 
     assertThat(actual.value).isEqualTo(DepositProcessed(command.accountId, command.amount, leavingBalance))
 }
