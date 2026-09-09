@@ -3,9 +3,11 @@ package sollecitom.lattice.inmemory
 import assertk.assertThat
 import assertk.assertions.isEqualTo
 import assertk.assertions.isGreaterThan
+import assertk.assertions.isNull
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS
+import sollecitom.lattice.core.distanceToOrNull
 import sollecitom.libs.swissknife.test.utils.assertions.failedThrowing
 
 @TestInstance(PER_CLASS)
@@ -33,9 +35,26 @@ class InMemoryPositionTests {
     }
 
     @Test
-    fun `refuses to compare across partitions`() {
+    fun `measures distance within a partition, signed`() {
+
+        assertThat(InMemoryPosition(1, 4).distanceTo(InMemoryPosition(1, 9))).isEqualTo(5L)
+        assertThat(InMemoryPosition(1, 9).distanceTo(InMemoryPosition(1, 4))).isEqualTo(-5L)
+    }
+
+    @Test
+    fun `refuses to relate positions in different partitions`() {
 
         assertThat(runCatching { InMemoryPosition(1, 5) > InMemoryPosition(2, 4) })
             .failedThrowing<IllegalArgumentException>()
+
+        assertThat(runCatching { InMemoryPosition(1, 5).distanceTo(InMemoryPosition(2, 4)) })
+            .failedThrowing<IllegalArgumentException>()
+    }
+
+    @Test
+    fun `distanceToOrNull yields null rather than throwing across partitions`() {
+
+        assertThat(InMemoryPosition(1, 4).distanceToOrNull(InMemoryPosition(1, 9))).isEqualTo(5L)
+        assertThat(InMemoryPosition(1, 4).distanceToOrNull(InMemoryPosition(2, 9))).isNull()
     }
 }

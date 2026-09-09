@@ -57,6 +57,9 @@ Company-agnostic. Depends on swissknife only, never pillar.
 | D33 | **Exactly one owner answers for a command.** Ambiguous command bindings are rejected at registration. Events stay fan-out. |
 | D34 | **Markers vs domain events is a type distinction**, so `apply(state, event)` cannot receive something replay must skip. |
 | D35 | The log entry for a submitted command is **`CommandReceived`** — "accept"/"reject" is reserved for the owner's verdict. |
+| D36 | A `Position` carries **identity** (opaque, scheme-tagged `encode()`) and **order** (`partition` + `offset`) as separate members. Never a bare scalar. |
+| D37 | **Resume is by message id, never by index** — index→id translation needs the admin API, which D15 forbids the runtime from holding. |
+| D38 | Lattice on Pulsar **requires Broker Entry Metadata** (`AppendIndexMetadataInterceptor` + client exposure). A deployment prerequisite, verified at startup. |
 
 ---
 
@@ -276,6 +279,77 @@ even if the client never awaits. That is the real payoff of async submission.
 
 This deserves to be written down because it is exactly the kind of thing that gets "optimised" into
 place later by someone who notices they can skip the await.
+
+### Positions: identity and order are different jobs (D36)
+
+```kotlin
+interface Position : Comparable<Position> {
+    val partition: Int
+    val offset: Long
+    fun encode(): String
+    fun distanceTo(other: Position): Long
+}
+
+fun Position.distanceToOrNull(other: Position): Long?
+```
+
+| Member | Job |
+|---|---|
+| `encode()` | **Identity** — resume, persistence, transport. Opaque, scheme-tagged. |
+| `offset` | **Order** — comparison, distance, lag. |
+
+**A position is never a scalar alone.** `(partition, offset)` is the minimum: a read model consuming
+several partitions has a *vector* of positions, and a bare `Long` would work perfectly in a
+single-partition test and be wrong everywhere after.
+
+**Comparison and distance are default implementations** on the interface, guarded by a shared check on
+both partition *and* implementation type — ranking `p0@999` against `p1@0` is meaningless, and so is
+ranking a Kafka position against a Pulsar one. Adapters supply only `encode()` and construction.
+`distanceToOrNull` is the non-throwing convenience for the cases where the caller expects a mismatch.
+
+### Why Pulsar can supply `offset` at all
+
+Pulsar's `MessageId` is `(ledgerId, entryId, partitionIndex, batchIndex)` — comparable, but not a
+counter: `entryId` resets to 0 on every ledger rollover, so it can't serve as an offset.
+
+**Broker Entry Metadata** solves this. With `AppendIndexMetadataInterceptor` enabled, the broker stamps
+each entry with a continuous, monotonically increasing per-partition **index** that survives ledger
+rollovers, incrementing once per message (so batched messages each get their own). Read via
+`msg.getIndex()` when `exposingBrokerEntryMetadataToClientEnabled` is set.
+
+```properties
+brokerEntryMetadataInterceptors=org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor
+exposingBrokerEntryMetadataToClientEnabled=true
+```
+
+Caveats accepted deliberately:
+
+- **Opt-in, and needs a broker restart.** This is a deployment prerequisite for lattice on Pulsar, not
+  something the framework can arrange for itself.
+- **Only messages written after enabling have an index.** Adopting lattice onto a pre-existing topic
+  leaves a prefix with none.
+- `hasIndex()` can be false at runtime if the cluster is misconfigured — which should fail loudly at
+  startup rather than silently degrading.
+
+### Resume is by message id, never by index (D37)
+
+The stored token is the opaque `encode()` form, and the adapter seeks with it directly.
+
+This matters beyond taste: translating index → `MessageId` uses `pulsarAdmin.topics().getMessageIdByIndex`
+(PIP-415), and **the admin API is exactly what D15 forbids the runtime from holding**. Seeking with a
+message id the node already has needs no elevated credentials, so the position design and the deployment
+model stop colliding.
+
+Consequence for the Pulsar adapter: `PulsarPosition` must carry **both** the `MessageId` and the index,
+and encode both — something like `pulsar1:<partition>:<index>:<base64 messageId>`. The index is not
+recoverable from a stored message id without consuming, so a position restored from the skip registry or
+a snapshot would otherwise be able to seek but unable to report lag.
+
+### Distance is exact on Pulsar, an upper bound on Kafka
+
+Pulsar's index increments per message, so `distanceTo` is an exact count. Kafka offsets are **not
+dense** — log compaction and transaction markers leave gaps — so there it over-reports. Fine for lag
+alerting and rebuild progress; do not build anything that assumes an exact event count.
 
 ### Verdict as the primitive, reactions as sugar
 

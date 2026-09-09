@@ -3,13 +3,7 @@ package sollecitom.lattice.inmemory
 import sollecitom.lattice.core.Position
 import sollecitom.lattice.core.Positions
 
-data class InMemoryPosition(override val partition: Int, val offset: Long) : Position {
-
-    override fun compareTo(other: Position): Int {
-        require(other is InMemoryPosition) { "cannot compare a $SCHEME position to ${other::class.simpleName}" }
-        require(partition == other.partition) { "positions in different partitions are not comparable: $this vs $other" }
-        return offset.compareTo(other.offset)
-    }
+data class InMemoryPosition(override val partition: Int, override val offset: Long) : Position {
 
     override fun encode() = "$SCHEME:$partition:$offset"
 
