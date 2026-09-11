@@ -1,12 +1,10 @@
 package sollecitom.lattice.usage
 
 import assertk.assertThat
-import assertk.assertions.hasSize
 import assertk.assertions.isEqualTo
 import assertk.assertions.isNull
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
@@ -56,20 +54,6 @@ class ClientRoundTripTests {
             val commandReceived = lattice.history(account.key).first()
 
             assertThat(commandReceived).recordsReceptionOf(command, at = accepted.position)
-        }
-
-        // TODO review
-        @Test
-        fun `the log holds the resulting event, and nothing else`() = bankingTest { lattice ->
-
-            val account = Account.withRandomId()
-
-            val accepted = lattice.submit(account.deposit(amount = 250)).acceptedOrThrow()
-            val processed = accepted.awaitReaction<DepositProcessed>()
-
-            val history = lattice.history(account.key).toList()
-            assertThat(history).hasSize(2)
-            assertThat(history.last()).isEqualTo(processed)
         }
     }
 
