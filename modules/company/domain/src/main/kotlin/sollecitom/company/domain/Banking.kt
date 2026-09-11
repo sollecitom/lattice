@@ -38,6 +38,8 @@ data class AccountState(val balance: Long = 0)
 
 object BankAccount : Aggregate<Deposit, DepositProcessed, AccountState> {
 
+    override val id = "account"
+
     override val initialState = AccountState()
 
     override fun decide(state: AccountState, command: Deposit): Decision<DepositProcessed> =
@@ -47,32 +49,31 @@ object BankAccount : Aggregate<Deposit, DepositProcessed, AccountState> {
         state.copy(balance = state.balance + event.amount)
 }
 
-data class Balances(val byAccount: Map<AccountId, Long> = emptyMap())
+data class Balances(private val byAccount: Map<AccountId, Long> = emptyMap()) {
 
-object BalanceReadModel : ReadModel<DepositProcessed, Balances, GetBalance> {
+    fun of(account: AccountId): Long = byAccount[account] ?: 0
+
+    fun crediting(account: AccountId, amount: Long) = Balances(byAccount + (account to of(account) + amount))
+}
+
+object BalanceReadModel : EventSourcedReadModel<DepositProcessed, Balances, GetBalance, Long> {
+
+    override val id = "balances"
 
     override val initialState = Balances()
 
-    override fun apply(state: Balances, event: DepositProcessed) = Balances(
-        state.byAccount + (event.accountId to (state.byAccount[event.accountId] ?: 0) + event.amount),
-    )
+    override fun apply(state: Balances, event: DepositProcessed) = state.crediting(event.accountId, event.amount)
 
-    @Suppress("UNCHECKED_CAST")
-    override fun <ANSWER> answer(state: Balances, query: Query<ANSWER>): ANSWER = when (query) {
-        is GetBalance -> (state.byAccount[query.accountId] ?: 0L) as ANSWER
-        else -> error("BalanceReadModel does not answer ${query::class.simpleName}")
-    }
+    override fun answer(state: Balances, query: GetBalance) = state.of(query.accountId)
 }
 
 fun LatticeEnvironment.registerBanking() {
     registerAggregate(
-        type = "account",
         aggregate = BankAccount,
         commandKey = { it.accountId.key() },
         eventKey = { it.accountId.key() },
     )
     registerReadModel(
-        name = "balances",
         readModel = BalanceReadModel,
         eventKey = { it.accountId.key() },
         queryKey = { it.accountId.key() },

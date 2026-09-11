@@ -1,6 +1,13 @@
 package sollecitom.lattice.core
 
-interface Position : Comparable<Position> {
+interface Positioned {
+
+    val position: Position
+}
+
+interface Position : Comparable<Position>, Positioned {
+
+    override val position: Position get() = this
 
     val partition: Int
 
@@ -35,12 +42,25 @@ sealed interface Freshness {
 
     data object Unconstrained : Freshness
 
-    data class AtLeast(val position: Position) : Freshness
-}
+    class AtLeast(of: Set<Positioned>) : Freshness {
 
-interface Positioned {
+        val positions: Set<Position> = of.map(Positioned::position).groupBy(Position::partition).values.map { it.max() }.toSet()
 
-    val position: Position
+        init {
+            require(positions.isNotEmpty()) { "a freshness constraint needs at least one position; use Unconstrained instead" }
+        }
+
+        override fun equals(other: Any?) = other is AtLeast && positions == other.positions
+
+        override fun hashCode() = positions.hashCode()
+
+        override fun toString() = "AtLeast($positions)"
+
+        companion object {
+
+            operator fun invoke(first: Positioned, vararg rest: Positioned) = AtLeast(setOf(first, *rest))
+        }
+    }
 }
 
 data class Recorded<out T>(val value: T, override val position: Position) : Positioned

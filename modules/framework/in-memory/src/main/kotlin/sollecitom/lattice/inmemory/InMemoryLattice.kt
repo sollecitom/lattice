@@ -5,96 +5,131 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import sollecitom.lattice.core.*
+import java.util.concurrent.Executors
 import kotlin.math.absoluteValue
 import kotlin.reflect.KClass
 
+val VirtualThreads: CoroutineDispatcher = Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher()
+
 class InMemoryLatticeEnvironment(
     private val partitionCount: Int = 8,
-    private val scheduler: ProjectionScheduler = ProjectionScheduler.Immediate,
+    private val dispatcher: CoroutineDispatcher = VirtualThreads,
 ) : LatticeEnvironment {
 
     private val aggregates = mutableListOf<RegisteredAggregate>()
     private val readModels = mutableListOf<RegisteredReadModel>()
     private var started = false
+    private val projections = mutableMapOf<String, Projection>()
+
+    val projectionsUnderTest = object : Projections {
+        override fun get(id: String) = projections[id] ?: error("no read model with id '$id'; known: ${projections.keys}")
+    }
 
     override fun <COMMAND : Command, EVENT : DomainEvent, STATE> registerAggregate(
-        type: String,
         aggregate: Aggregate<COMMAND, EVENT, STATE>,
         commandType: KClass<COMMAND>,
         commandKey: (COMMAND) -> String,
         eventKey: (EVENT) -> String,
     ) {
-        check(!started) { "cannot register '$type' after start()" }
+        val id = aggregate.id
+        check(!started) { "cannot register '$id' after start()" }
         aggregates.firstOrNull { it.commandType == commandType }?.let {
-            error("command ${commandType.simpleName} is already owned by '${it.type}'; a command has exactly one owner")
+            error("command ${commandType.simpleName} is already owned by '${it.id}'; a command has exactly one owner")
         }
         @Suppress("UNCHECKED_CAST")
         aggregates += RegisteredAggregate(
-            type = type,
+            id = id,
             commandType = commandType,
-            commandKey = { validRoutingKey((commandKey as (Command) -> String)(it), "commandKey of '$type'") },
-            eventKey = { validRoutingKey((eventKey as (DomainEvent) -> String)(it), "eventKey of '$type'") },
+            commandKey = { validRoutingKey((commandKey as (Command) -> String)(it), "commandKey of '$id'") },
+            eventKey = { validRoutingKey((eventKey as (DomainEvent) -> String)(it), "eventKey of '$id'") },
             initialState = aggregate.initialState,
             decide = { state, command -> aggregate.decide(state as STATE, command as COMMAND) },
             apply = { state, event -> aggregate.apply(state as STATE, event as EVENT) },
         )
     }
 
-    override fun <EVENT : DomainEvent, STATE, QUERY : Query<*>> registerReadModel(
-        name: String,
-        readModel: ReadModel<EVENT, STATE, QUERY>,
+    override fun <EVENT : DomainEvent, STATE, QUERY : Query<ANSWER>, ANSWER> registerReadModel(
+        readModel: EventSourcedReadModel<EVENT, STATE, QUERY, ANSWER>,
         eventType: KClass<EVENT>,
         queryType: KClass<QUERY>,
         eventKey: (EVENT) -> String,
         queryKey: (QUERY) -> String,
     ) {
-        check(!started) { "cannot register '$name' after start()" }
+        val id = readModel.id
+        check(!started) { "cannot register '$id' after start()" }
+        projections[id] = Projection()
         @Suppress("UNCHECKED_CAST")
         readModels += RegisteredReadModel(
-            name = name,
+            name = id,
+            gate = projections.getValue(id),
             eventType = eventType,
             queryType = queryType,
-            queryKey = { validRoutingKey((queryKey as (Query<*>) -> String)(it), "queryKey of '$name'") },
+            queryKey = { validRoutingKey((queryKey as (Query<*>) -> String)(it), "queryKey of '$id'") },
             initialState = readModel.initialState as Any,
             apply = { state, event -> readModel.apply(state as STATE, event as EVENT) as Any },
-            answer = { state, query -> readModel.answer(state as STATE, query) },
+            answer = { state, query -> readModel.answer(state as STATE, query as QUERY) },
+        )
+    }
+
+    override fun <EVENT : DomainEvent, QUERY : Query<ANSWER>, ANSWER> registerReadModel(
+        readModel: MaterialisingReadModel<EVENT, QUERY, ANSWER>,
+        eventType: KClass<EVENT>,
+        queryType: KClass<QUERY>,
+        eventKey: (EVENT) -> String,
+        queryKey: (QUERY) -> String,
+    ) {
+        val id = readModel.id
+        check(!started) { "cannot register '$id' after start()" }
+        projections[id] = Projection()
+        @Suppress("UNCHECKED_CAST")
+        readModels += RegisteredReadModel(
+            name = id,
+            gate = projections.getValue(id),
+            eventType = eventType,
+            queryType = queryType,
+            queryKey = { validRoutingKey((queryKey as (Query<*>) -> String)(it), "queryKey of '$id'") },
+            initialState = Unit,
+            apply = { _, event -> readModel.apply(event as EVENT); Unit },
+            answer = { _, query -> readModel.answer(query as QUERY) },
         )
     }
 
     override suspend fun start(): Lattice {
         started = true
-        return RunningLattice(partitionCount, aggregates.toList(), readModels.toList(), scheduler)
+        return RunningLattice(partitionCount, aggregates.toList(), readModels.toList(), dispatcher)
     }
 }
 
-fun interface ProjectionScheduler {
+class Projection {
 
-    suspend fun beforeApply(position: Position)
+    private val running = MutableStateFlow(true)
 
-    companion object {
-        val Immediate = ProjectionScheduler { }
+    internal suspend fun awaitRunning() = running.first { it }
+
+    fun pause() {
+        running.value = false
+    }
+
+    fun resume() {
+        running.value = true
     }
 }
 
-class ManualProjectionScheduler : ProjectionScheduler {
+interface Projections {
 
-    private val released = CompletableDeferred<Unit>()
-
-    override suspend fun beforeApply(position: Position) = released.await()
-
-    fun release() {
-        released.complete(Unit)
-    }
+    operator fun get(id: String): Projection
 }
+
+operator fun Projections.get(readModel: ProjectingReadModel<*>): Projection = get(readModel.id)
 
 private class RunningLattice(
     partitionCount: Int,
     private val aggregates: List<RegisteredAggregate>,
     private val readModels: List<RegisteredReadModel>,
-    scheduler: ProjectionScheduler,
+    dispatcher: CoroutineDispatcher,
 ) : Lattice {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val log = PartitionedLog(partitionCount)
     private val pending = mutableMapOf<Id, CompletableDeferred<Verdict>>()
     private val pendingMutex = Mutex()
@@ -105,7 +140,7 @@ private class RunningLattice(
         }
         readModels.forEach { registered ->
             repeat(partitionCount) { partition ->
-                scope.launch { registered.consume(log.stream(partition), partition, scheduler) }
+                scope.launch { registered.consume(log.stream(partition), partition) }
             }
         }
     }
@@ -125,7 +160,7 @@ private class RunningLattice(
         val readModel = readModels.firstOrNull { it.answers(query) }
             ?: error("no read model answers ${query::class.simpleName}")
 
-        if (atLeast is Freshness.AtLeast) readModel.awaitAppliedThrough(atLeast.position)
+        if (atLeast is Freshness.AtLeast) atLeast.positions.forEach { readModel.awaitAppliedThrough(it) }
 
         val partition = log.partitionFor(readModel.queryKey(query))
         return Answered(readModel.answer(query), readModel.appliedThrough(partition))
@@ -213,7 +248,7 @@ private class PartitionedLog(private val partitionCount: Int) {
 }
 
 private class RegisteredAggregate(
-    val type: String,
+    val id: String,
     val commandType: KClass<out Command>,
     val commandKey: (Command) -> String,
     val eventKey: (DomainEvent) -> String,
@@ -224,12 +259,13 @@ private class RegisteredAggregate(
 
 private class RegisteredReadModel(
     val name: String,
+    private val gate: Projection,
     private val eventType: KClass<out DomainEvent>,
     private val queryType: KClass<out Query<*>>,
     val queryKey: (Query<*>) -> String,
     initialState: Any,
-    private val apply: (Any, DomainEvent) -> Any,
-    private val answer: (Any, Query<*>) -> Any?,
+    private val apply: suspend (Any, DomainEvent) -> Any,
+    private val answer: suspend (Any, Query<*>) -> Any?,
 ) {
 
     private val stateMutex = Mutex()
@@ -239,7 +275,7 @@ private class RegisteredReadModel(
     fun answers(query: Query<*>): Boolean = queryType.isInstance(query)
 
     @Suppress("UNCHECKED_CAST")
-    fun <ANSWER> answer(query: Query<ANSWER>): ANSWER = answer(state, query) as ANSWER
+    suspend fun <ANSWER> answer(query: Query<ANSWER>): ANSWER = answer(state, query) as ANSWER
 
     fun appliedThrough(partition: Int): Position = progressOf(partition).value
 
@@ -247,9 +283,9 @@ private class RegisteredReadModel(
         progressOf(position.partition).first { it >= position }
     }
 
-    suspend fun consume(stream: Flow<Recorded<Event>>, partition: Int, scheduler: ProjectionScheduler) {
+    suspend fun consume(stream: Flow<Recorded<Event>>, partition: Int) {
         stream.collect { (event, position) ->
-            scheduler.beforeApply(position)
+            gate.awaitRunning()
             if (eventType.isInstance(event)) {
                 stateMutex.withLock { state = apply(state, event as DomainEvent) }
             }

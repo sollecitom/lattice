@@ -55,16 +55,22 @@ interface Lattice {
 interface LatticeEnvironment {
 
     fun <COMMAND : Command, EVENT : DomainEvent, STATE> registerAggregate(
-        type: String,
         aggregate: Aggregate<COMMAND, EVENT, STATE>,
         commandType: KClass<COMMAND>,
         commandKey: (COMMAND) -> String,
         eventKey: (EVENT) -> String,
     )
 
-    fun <EVENT : DomainEvent, STATE, QUERY : Query<*>> registerReadModel(
-        name: String,
-        readModel: ReadModel<EVENT, STATE, QUERY>,
+    fun <EVENT : DomainEvent, STATE, QUERY : Query<ANSWER>, ANSWER> registerReadModel(
+        readModel: EventSourcedReadModel<EVENT, STATE, QUERY, ANSWER>,
+        eventType: KClass<EVENT>,
+        queryType: KClass<QUERY>,
+        eventKey: (EVENT) -> String,
+        queryKey: (QUERY) -> String,
+    )
+
+    fun <EVENT : DomainEvent, QUERY : Query<ANSWER>, ANSWER> registerReadModel(
+        readModel: MaterialisingReadModel<EVENT, QUERY, ANSWER>,
         eventType: KClass<EVENT>,
         queryType: KClass<QUERY>,
         eventKey: (EVENT) -> String,
@@ -74,16 +80,20 @@ interface LatticeEnvironment {
     suspend fun start(): Lattice
 }
 
+inline fun <reified EVENT : DomainEvent, reified QUERY : Query<ANSWER>, ANSWER> LatticeEnvironment.registerReadModel(
+    readModel: MaterialisingReadModel<EVENT, QUERY, ANSWER>,
+    noinline eventKey: (EVENT) -> String,
+    noinline queryKey: (QUERY) -> String,
+) = registerReadModel(readModel, EVENT::class, QUERY::class, eventKey, queryKey)
+
 inline fun <reified COMMAND : Command, EVENT : DomainEvent, STATE> LatticeEnvironment.registerAggregate(
-    type: String,
     aggregate: Aggregate<COMMAND, EVENT, STATE>,
     noinline commandKey: (COMMAND) -> String,
     noinline eventKey: (EVENT) -> String,
-) = registerAggregate(type, aggregate, COMMAND::class, commandKey, eventKey)
+) = registerAggregate(aggregate, COMMAND::class, commandKey, eventKey)
 
-inline fun <reified EVENT : DomainEvent, STATE, reified QUERY : Query<*>> LatticeEnvironment.registerReadModel(
-    name: String,
-    readModel: ReadModel<EVENT, STATE, QUERY>,
+inline fun <reified EVENT : DomainEvent, STATE, reified QUERY : Query<ANSWER>, ANSWER> LatticeEnvironment.registerReadModel(
+    readModel: EventSourcedReadModel<EVENT, STATE, QUERY, ANSWER>,
     noinline eventKey: (EVENT) -> String,
     noinline queryKey: (QUERY) -> String,
-) = registerReadModel(name, readModel, EVENT::class, QUERY::class, eventKey, queryKey)
+) = registerReadModel(readModel, EVENT::class, QUERY::class, eventKey, queryKey)

@@ -60,6 +60,14 @@ Company-agnostic. Depends on swissknife only, never pillar.
 | D36 | A `Position` carries **identity** (opaque, scheme-tagged `encode()`) and **order** (`partition` + `offset`) as separate members. Never a bare scalar. |
 | D37 | **Resume is by message id, never by index** — index→id translation needs the admin API, which D15 forbids the runtime from holding. |
 | D38 | Lattice on Pulsar **requires Broker Entry Metadata** (`AppendIndexMetadataInterceptor` + client exposure). A deployment prerequisite, verified at startup. |
+| D39 | **Handlers carry their own `id`** — `Aggregate` and `ReadModel`; registration takes no name argument. |
+| D40 | **Aggregates are stateless singletons.** State is a parameter, owned by the framework — not a field, and no per-key instances or factory. |
+| D41 | The framework **owns no DI container**. Registration accepts constructed objects. |
+| D42 | `ReadModel` is a **sealed umbrella**; `EventSourcedReadModel` is one kind. External and self-owned-state read models are planned siblings, not shipped. |
+| D43 | External data in a decision goes via **reactor plus a second event**, not an inline lookup. |
+| D44 | `ProjectingReadModel` is the pausable, freshness-capable level: `EventSourcedReadModel` (framework-owned state) and `MaterialisingReadModel` (self-owned state). |
+| D45 | Handlers run on a **virtual-thread dispatcher**, injectable. Fixes cross-partition contamination from blocking calls; does not make the blocking partition progress. |
+| D46 | A read model **binds its answer type**: `ReadModel<..., QUERY : Query<ANSWER>, ANSWER>`. Several query types per read model use a **sealed union** as `ANSWER`. No casts and no `Any?` in domain code. |
 
 ---
 
@@ -108,6 +116,205 @@ stalls must not stall derivation.
 
 Consequence of at-least-once plus side effects: **reactors must be idempotent**, or the framework must
 supply outbound idempotency keys. See Q2.
+
+---
+
+## Handler identity, lifecycle, and dependencies
+
+### Handlers carry their own id (D39)
+
+`Aggregate` and `ReadModel` each expose `val id: String`, and registration takes no name argument — one
+source of truth, and `projections[BalanceReadModel]` can look a projection up by the object rather than
+a string. To register the same class twice under different ids, decorate it.
+
+### Aggregates are stateless singletons, not instances per key (D40)
+
+One `Aggregate` instance serves every key. State is a parameter, never a field:
+
+```kotlin
+fun decide(state: STATE, command: COMMAND): Decision<EVENT>
+fun apply(state: STATE, event: EVENT): STATE
+```
+
+**The framework must own the state**, because snapshotting, rehydration after a rebalance, and replay
+are all framework responsibilities. An aggregate holding its own state would need a serialisation hook
+for each of them, and replay would stop being a plain fold. It also makes testing free —
+`BankAccount.decide(AccountState(500), Withdraw(300))`, no setup, no mocks.
+
+Worth stating explicitly because "aggregate" in DDD usually implies an instance. Here the *state* is the
+instance-shaped thing, and `initialState` is its factory.
+
+**Open — `val initialState` vs `fun initialState(key: String)`.** As a `val`, one shared object is handed
+to every key: correct while state is immutable (which `apply` returning a new STATE implies) but silent
+cross-key corruption if someone returns something mutable. The function form closes that and would let
+state know which entity it is, which aggregates often want. It's a contract, so cheaper to decide now.
+
+### Dependency injection: mostly already there, and the wrong tool where it isn't
+
+The framework **must not own a DI container**. Registration accepts constructed objects, so the
+application uses Koin, manual wiring, or nothing.
+
+| | Injection | Notes |
+|---|---|---|
+| Reactors, projections | Ordinary constructor injection | Suspending and side-effecting by design; nothing to solve |
+| Aggregates, genuinely fixed config | Ordinary constructor injection | Currency decimals, hash algorithm — values that never change |
+| Aggregates, config that changes and affects decisions | **No** | That is external data, not configuration |
+
+**The constraint: anything influencing a decision must be replayable.** Decide under
+`maxWithdrawal = 10_000`, replay two years later under `5_000`, and replay yields a different answer
+than history recorded — state derived from the log stops matching the log, silently, discovered during
+a rebuild.
+
+So changeable config belongs in the log, by one of two routes: record the value used in the resulting
+event (`Withdrawn(amount, limitApplied = 10_000)`) so replay reads what was actually applied, or model
+config changes as events the aggregate folds into state so replay sees the value as of that point. This
+is the same rule as just-in-time lookups — fetch, write the result as an event, then apply. Config is
+just slow-moving external data.
+
+### Read models: a sealed umbrella, not one shape (D42)
+
+`ReadModel` used to mandate `initialState` + `apply`, which meant every read model was necessarily a
+projection and an **external** one could not be expressed at all. Split so that door stays open:
+
+```kotlin
+sealed interface ReadModel<QUERY : Query<*>> {
+    val id: String
+}
+
+interface EventSourcedReadModel<EVENT : DomainEvent, STATE, QUERY : Query<*>> : ReadModel<QUERY> {
+    val initialState: STATE
+    fun apply(state: STATE, event: EVENT): STATE
+    fun <ANSWER> answer(state: STATE, query: Query<ANSWER>): ANSWER
+}
+```
+
+Sealed because the framework has to know how to *run* each kind — a user cannot invent a third.
+
+```
+ReadModel (sealed)
+├── ProjectingReadModel (sealed)   framework drives apply → pausable, freshness-capable
+│   ├── EventSourcedReadModel      framework owns the state
+│   └── MaterialisingReadModel     the read model owns the state
+└── ExternalReadModel              no apply at all                          (not shipped)
+```
+
+The middle level is the one that earns its place: **"the framework drives event application"** is
+exactly what makes pausing and freshness meaningful, and it is what `projections[readModel]` requires —
+so pausing something with nothing to project will not compile.
+
+**`MaterialisingReadModel`** covers state in Postgres, a search index, anywhere the framework cannot
+see. `suspend fun apply(event)` and `suspend fun answer(query)`; the framework tracks position only.
+
+*Decomposing it into a sink plus an external read model was considered and rejected.* Two registrations
+for one logical read model means the query side does not know the writer's position — so
+`Freshness.AtLeast` cannot be answered, and pausing controls only half of it. Keeping them one
+registration is what preserves both.
+
+The trade versus `EventSourcedReadModel`:
+
+| | Framework can snapshot | Rebuild |
+|---|---|---|
+| `EventSourcedReadModel` | yes — it holds the `STATE` | fold from zero, or from a snapshot |
+| `MaterialisingReadModel` | no — the state is foreign | replay from zero; the read model must be idempotent or truncate first |
+
+**`ExternalReadModel` remains unshipped** (an interface nobody can register is worse than no interface).
+It answers from a system it does not maintain and has no `apply`, which forces two changes when it
+lands: `Answered.appliedThrough` becomes optional, and `Freshness.AtLeast` must be rejected for it.
+See Q10.
+
+**Considered and rejected: giving the read model the history (a list or flow) rather than one event.**
+Three reasons it isn't needed here, which pull apart:
+
+- *Snapshot-capped rehydration already works.* Resuming from a snapshot means deserialising a `STATE`
+  and folding the delta through the same `apply` — the read model cannot tell the difference. The
+  missing piece is STATE serialisation (Q6), not the interface.
+- *Expressiveness is unaffected.* A read model needing the last 10 transactions or a rolling window
+  carries that **in its state**; `STATE` is whatever it wants. No computation the flow form enables is
+  out of reach for the fold.
+- *What a list genuinely buys is batching* — 1000 events written to Postgres one at a time is far slower
+  than one batched write, and `apply(state, event)` leaves the framework nowhere to batch. But that only
+  matters once state is I/O-backed, which is precisely the self-owned-state sibling above. Batching
+  belongs on that interface, where it can also express when the batch became durable.
+
+*Naming note:* how a read model derives its answer — in-memory fold, materialised table, recomputation —
+is invisible to the framework, which sees only `apply` and `answer`. The distinction that matters is
+whether the framework owns the state, not how the state is built.
+
+### External data in a decision: reactor plus a second event (D43)
+
+An aggregate cannot call out — `decide` is non-suspending, which is D3. The reason is not performance:
+**a suspending `decide` breaks replay**, because re-running it later re-queries a blocklist that has
+changed or a temperature that has moved, producing a decision history that was never recorded.
+
+Had it been allowed, the blast radius has three layers, and only the innermost is unavoidable:
+
+- **Every key in that partition** stalls behind the call. At 256 partitions and 100k accounts that is
+  ~390 accounts. This is the real cost.
+- **Other partitions on the same node** are unaffected *if the call suspends* — each
+  `(aggregate, partition)` pair has its own coroutine. A genuinely *blocking* call (JDBC, `runBlocking`)
+  occupies a `Dispatchers.Default` thread instead, and enough of them exhaust the pool and stall the
+  whole node. So "suspending" versus "blocking" decides whether the node survives.
+- **Other nodes** are never affected: a partition is consumed by exactly one node (D17), so the
+  cross-partition blast radius is bounded by how many partitions that node owns.
+
+Worth being precise about the lever, because it is counter-intuitive: **adding nodes does not help.**
+The keys-behind-one-call number is set by the keys-to-*partitions* ratio, not by instance count. Only
+more partitions reduce it — and partition count is fixed at provision time, with repartitioning
+destructive to key affinity (D15). So it has to be over-provisioned up front.
+
+Two mechanisms, and **the decision for now is the second**:
+
+| | How | Cost |
+|---|---|---|
+| Just-in-time lookup | Framework fetches before `decide`, appends the result as an event, applies it, then calls the pure function. Replay skips the fetch and applies the record. | Still blocks the partition for the fetch; only viable with a TTL cache making it rare |
+| **Reactor plus a second event** | A reactor consumes `CommandReceived`, does the call, emits `BlocklistChecked`; the aggregate reacts to *that*. | The command's outcome is no longer a single verdict — it becomes a choreographed multi-step flow |
+
+Chosen because it keeps the aggregate path fast and pure, parallelises naturally, and reuses the saga
+shape already established rather than adding a second mechanism. Revisit if the multi-step cost proves
+too high for common cases.
+
+**This implies more participant kinds than aggregates, reactors and projections** — data enrichers, data
+sources, sinks mapping to external systems. Not modelled yet; the current `reactor` is a placeholder for
+a family.
+
+**Blocking calls are the unsolved half (Q12).** `decide` being non-suspending prevents *suspend* calls,
+not *blocking* ones — nothing stops a JDBC query or `Thread.sleep` inside it, and the same is true of
+`EventSourcedReadModel.apply`. Enough concurrent blocking calls exhaust `Dispatchers.Default` and stall
+the node, not just the partition.
+
+**Handlers therefore run on virtual threads** (D45) —
+`Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher()`, injectable so tests can supply
+their own. JDK 25 makes this safe: JEP 491 removed the `synchronized` pinning that used to undermine it.
+
+**Be precise about what that fixes.** Virtual threads change the blast radius, not the blocking:
+
+| Layer | Fixed by virtual threads? |
+|---|---|
+| Keys in that partition | **No.** The call still has to complete; that partition is still stalled. |
+| Other partitions on the same node | **Yes.** The blocking call parks a virtual thread and releases its carrier, so the pool cannot be exhausted. |
+| Other nodes | Unaffected either way. |
+
+Only per-key concurrency within a partition addresses the first row, and that is the watermark-commit
+problem below. The dispatcher parameter is also the seam Q11 needs for virtual-time tests.
+
+**Unenforced hazard:** nothing stops a `var` inside an aggregate. Purity is what makes one instance safe
+across every partition, and a mutable field is a silent data race with no error. `decide` being
+non-suspending prevents I/O, not state.
+
+**Deeper point worth keeping:** per-*key* ordering is the guarantee; partition-sequential execution is
+merely the simplest implementation of it. An engine could run keys within a partition concurrently and
+preserve the guarantee, so one key's lookup would not block its neighbours. The cost is offset commits
+becoming a watermark problem — the same complexity as per-key parking.
+
+### Open: aggregates cannot see time
+
+The most common dependency an aggregate reaches for is a clock, and it cannot have one — `Instant.now()`
+inside `decide` breaks replay outright.
+
+The correct source is the envelope's recorded timestamp, but `decide(state, command)` does not receive
+the envelope, so **today an aggregate has no way to know when something happened**. The anticipated
+shape is `context(env: Envelope) fun decide(...)`. Not built; the one item here that needs framework
+work rather than a constructor argument.
 
 ---
 
@@ -1282,6 +1489,70 @@ position tracking · rebuild from zero while the old version keeps serving · ve
 atomic cutover · lag and backpressure observability · **read-your-own-writes** via the position token ·
 escape hatches (raw store access, custom apply, opt out of framework storage).
 
+### Answer types are bound, not erased (D46)
+
+A read model declares what it answers with, as a type parameter constrained through the query:
+
+```kotlin
+interface EventSourcedReadModel<EVENT : DomainEvent, STATE, QUERY : Query<ANSWER>, ANSWER> : ProjectingReadModel<QUERY> {
+
+    fun answer(state: STATE, query: QUERY): ANSWER
+}
+```
+
+Binding `ANSWER` is what makes `GetBalance : Query<Long>` enforceable: returning a `String` is a
+compile error at the read model, not a `ClassCastException` at the caller. Two alternatives were
+tried and dropped:
+
+- **`answer(...): Any?`** — no check at all. The read model that declares a query type should only be
+  allowed to answer with that query's type.
+- **An abstract base with per-query registration** (`answers(GetBalance::class) { ... }`, a
+  `KClass`-keyed map, one unchecked cast inside the base). It does type-check each pair, and it does
+  allow several answer types per read model, but it costs an `init` block, a registration DSL, and
+  runtime dispatch to buy a check the type parameter already provides for the common case.
+
+No abstract class is needed, because the domain never performs the cast. The engine holds read models
+behind erased lambdas and already narrows `Query<*>` to `QUERY` at that boundary under a single
+`@Suppress("UNCHECKED_CAST")`; widening the return type there costs nothing.
+
+### Multiple query types: a sealed union
+
+Kotlin has no untagged union, so the spelling is a sealed interface, and it needs no framework change
+because `Query<out ANSWER>` is already covariant:
+
+```kotlin
+sealed interface AccountAnswer
+@JvmInline value class Balance(val amount: Long) : AccountAnswer
+@JvmInline value class History(val entries: List<Entry>) : AccountAnswer
+
+data class GetBalance(val accountId: AccountId) : Query<Balance>
+data class GetHistory(val accountId: AccountId) : Query<History>
+
+object AccountReadModel : EventSourcedReadModel<DepositProcessed, AccountState, AccountQuery, AccountAnswer> {
+
+    override fun answer(state: AccountState, query: AccountQuery) = when (query) {
+        is GetBalance -> Balance(state.balance)
+        is GetHistory -> History(state.entries)
+    }
+}
+```
+
+Covariance is what makes this pay. The read model widens to `AccountAnswer`, but the caller does not
+narrow: `query` reads `ANSWER` off the *query*, so `query(GetBalance(id))` returns `Answered<Balance>`.
+The union is an implementation detail of the read model.
+
+Two costs, both accepted:
+
+- **Wrappers for primitives.** `Long` cannot implement a sealed interface, so `Balance` must exist.
+  `@JvmInline` makes it free at runtime, and the naming is an improvement regardless.
+- **The pairing is unchecked.** The compiler enforces that the answer is *in* the union, not that
+  `GetBalance` yields a `Balance` — `is GetBalance -> History(...)` compiles. An exhaustive `when` over
+  a sealed `AccountQuery` catches a missing branch, not a swapped one.
+
+The ladder: one query type → the bound parameter, fully checked. Several → sealed union, checked to
+within the union. Per-query checking *and* several queries → the registration map, which nothing
+needs yet.
+
 ---
 
 ## Deployment and topology
@@ -1504,6 +1775,26 @@ swissknife's `correlation/*` models it and it must flow HTTP → log → aggrega
 
 **Q5** — Actor scheduling policy between the command/event stream and the query stream. Fair-share, or
 command-priority?
+
+**Q12** — Blocking (not suspending) calls inside a handler can exhaust `Dispatchers.Default` and stall a
+node. Likely answer: run handlers on a virtual-thread dispatcher (JDK 25). Shares the injectable-
+dispatcher seam with Q11.
+
+**Q8** — `val initialState` vs `fun initialState(key: String)` on `Aggregate`. The `val` form shares one
+object across every key — fine while state is immutable, silent corruption if not. See *Handler
+identity, lifecycle, and dependencies*.
+
+**Q9** — Aggregates cannot see time. `decide(state, command)` has no envelope, and a clock would break
+replay. Anticipated shape: `context(env: Envelope) fun decide(...)`.
+
+**Q10** — Does `Answered.appliedThrough` become a vector, now that `Freshness.AtLeast` is one? The
+response position exists to be fed back as the next request's floor, so the asymmetry will bite when
+someone chains queries across partitions.
+
+**Q11** — The 200ms timeout in the read-your-own-writes test. It cannot false-*fail* (a paused
+projection means the query provably cannot complete) but it is arbitrary and burns wall clock. Removing
+it means injecting a dispatcher into `InMemoryLatticeEnvironment` and moving `latticeTest` from
+swissknife's `test { }` to `runTest`, so virtual time applies.
 
 **Q6** — Snapshots (the derived recovery store, D27). Can't slip past phase 5 — rebalance pain is a
 direct function of it. Shape mostly settled; the open parts are cadence and format:

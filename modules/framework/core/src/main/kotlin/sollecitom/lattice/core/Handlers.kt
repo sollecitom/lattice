@@ -13,6 +13,8 @@ fun reject(reason: String): Decision<Nothing> = Decision.Reject(reason)
 
 interface Aggregate<COMMAND : Command, EVENT : DomainEvent, STATE> {
 
+    val id: String
+
     val initialState: STATE
 
     fun decide(state: STATE, command: COMMAND): Decision<EVENT>
@@ -20,11 +22,25 @@ interface Aggregate<COMMAND : Command, EVENT : DomainEvent, STATE> {
     fun apply(state: STATE, event: EVENT): STATE
 }
 
-interface ReadModel<EVENT : DomainEvent, STATE, QUERY : Query<*>> {
+sealed interface ReadModel<QUERY : Query<*>> {
+
+    val id: String
+}
+
+sealed interface ProjectingReadModel<QUERY : Query<*>> : ReadModel<QUERY>
+
+interface MaterialisingReadModel<EVENT : DomainEvent, QUERY : Query<ANSWER>, ANSWER> : ProjectingReadModel<QUERY> {
+
+    suspend fun apply(event: EVENT)
+
+    suspend fun answer(query: QUERY): ANSWER
+}
+
+interface EventSourcedReadModel<EVENT : DomainEvent, STATE, QUERY : Query<ANSWER>, ANSWER> : ProjectingReadModel<QUERY> {
 
     val initialState: STATE
 
     fun apply(state: STATE, event: EVENT): STATE
 
-    fun <ANSWER> answer(state: STATE, query: Query<ANSWER>): ANSWER
+    fun answer(state: STATE, query: QUERY): ANSWER
 }

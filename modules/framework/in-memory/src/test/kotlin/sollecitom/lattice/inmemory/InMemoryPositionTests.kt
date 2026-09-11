@@ -8,10 +8,30 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS
 import assertk.assertions.messageContains
+import assertk.assertions.containsOnly
+import sollecitom.lattice.core.Freshness
 import sollecitom.lattice.core.MAX_ROUTING_KEY_LENGTH
 import sollecitom.lattice.core.distanceToOrNull
 import sollecitom.lattice.core.validRoutingKey
 import sollecitom.libs.swissknife.test.utils.assertions.failedThrowing
+
+@TestInstance(PER_CLASS)
+class FreshnessTests {
+
+    @Test
+    fun `collapses several positions in one partition to the strongest`() {
+
+        val constraint = Freshness.AtLeast(InMemoryPosition(1, 4), InMemoryPosition(1, 9), InMemoryPosition(2, 3))
+
+        assertThat(constraint.positions).containsOnly(InMemoryPosition(1, 9), InMemoryPosition(2, 3))
+    }
+
+    @Test
+    fun `refuses an empty constraint`() {
+
+        assertThat(runCatching { Freshness.AtLeast(emptySet()) }).failedThrowing<IllegalArgumentException>()
+    }
+}
 
 @TestInstance(PER_CLASS)
 class RoutingKeyTests {
