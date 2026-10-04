@@ -24,7 +24,7 @@ Company-agnostic. Depends on swissknife only, never pillar.
 |---|---|
 | D1 | Versioning is **major only** in the path. Compatible evolution within a major is resolved by schema, not by a new endpoint. |
 | D2 | **No codegen.** Routes, OpenAPI, and schemas are derived at runtime from registrations. |
-| D3 | **Aggregates only consume events and only produce events.** Pure, non-suspending. |
+| D3 | **Aggregates only consume events and only produce events.** `apply` is pure and non-suspending — replay re-runs it. `decide` suspends — replay never re-runs it, and suspending is the more general contract. |
 | D4 | **Commands always become events** (`CommandReceived`) before an aggregate sees them. No exceptions. |
 | D5 | Three validation tiers: **structural** (schema) → **permissions** (+ integrity) → **invariant** (aggregate state). |
 | D6 | Commands rejected at structural / permissions / integrity **never reach the log**. Only invariant rejection is journaled. |
@@ -64,7 +64,7 @@ Company-agnostic. Depends on swissknife only, never pillar.
 | D40 | **Aggregates are stateless singletons.** State is a parameter, owned by the framework — not a field, and no per-key instances or factory. |
 | D41 | The framework **owns no DI container**. Registration accepts constructed objects. |
 | D42 | `ReadModel` is a **sealed umbrella**; `EventSourcedReadModel` is one kind. External and self-owned-state read models are planned siblings, not shipped. |
-| D43 | External data in a decision goes via **reactor plus a second event**, not an inline lookup. |
+| D43 | External data in a decision: **reactor plus a second event** is the recommended route. An inline call in a suspending `decide` is permitted, and stalls the partition. |
 | D44 | `ProjectingReadModel` is the pausable, freshness-capable level: `EventSourcedReadModel` (framework-owned state) and `MaterialisingReadModel` (self-owned state). |
 | D45 | Handlers run on a **virtual-thread dispatcher**, injectable. Fixes cross-partition contamination from blocking calls; does not make the blocking partition progress. |
 | D46 | A read model **binds its answer type**: `ReadModel<..., QUERY : Query<ANSWER>, ANSWER>`. Several query types per read model use a **sealed union** as `ANSWER`. No casts and no `Any?` in domain code. |
@@ -105,14 +105,14 @@ whole bug class.
 
 | | State | Suspending | Side effects | Failure blast radius |
 |---|---|---|---|---|
-| **Aggregate** | Owns entity state, derived from its partition | No — pure | No | Its partition |
+| **Aggregate** | Owns entity state, derived from its partition | `decide` yes, `apply` no | No | Its partition |
 | **Reactor** | None (or external) | Yes | Yes — external calls | Its own consumption, must not stall aggregates |
 | **Projection** | Owns read-model state | Yes | Writes to its store | Its own lag |
 
 The reactor is the participant that receives an event, runs a suspending function that may call the
-outside world, and emits a resulting event. It is **not** an aggregate — D3 keeps those pure — and the
-distinction is load-bearing for D20: reactors can stall, so they must consume independently, and their
-stalls must not stall derivation.
+outside world, and emits a resulting event. It is **not** an aggregate, and the distinction is load-bearing for D20:
+reactors can stall, so they must consume independently, and their stalls must not stall derivation. An
+aggregate *may* suspend in `decide`, but every key on its partition waits for it (D43).
 
 Consequence of at-least-once plus side effects: **reactors must be idempotent**, or the framework must
 supply outbound idempotency keys. See Q2.
@@ -160,12 +160,15 @@ application uses Koin, manual wiring, or nothing.
 | Aggregates, genuinely fixed config | Ordinary constructor injection | Currency decimals, hash algorithm — values that never change |
 | Aggregates, config that changes and affects decisions | **No** | That is external data, not configuration |
 
-**The constraint: anything influencing a decision must be replayable.** Decide under
-`maxWithdrawal = 10_000`, replay two years later under `5_000`, and replay yields a different answer
-than history recorded — state derived from the log stops matching the log, silently, discovered during
-a rebuild.
+**The constraint is on `apply`, not `decide`.** Replay folds the *output* events through `apply`;
+`decide` is never re-run. Config read in `decide` changes future decisions, which is the point of
+changing it. Config read in `apply` changes *past* state on rebuild — fold `Withdrawn` events under a
+new rule and state derived from the log stops matching the log, silently, discovered during a rebuild.
 
-So changeable config belongs in the log, by one of two routes: record the value used in the resulting
+The remaining reason to record config used by `decide` is **auditability**: "why was this refused?"
+is unanswerable if the limit in force never reached the log.
+
+So changeable config that decisions depend on belongs in the log, by one of two routes: record the value used in the resulting
 event (`Withdrawn(amount, limitApplied = 10_000)`) so replay reads what was actually applied, or model
 config changes as events the aggregate folds into state so replay sees the value as of that point. This
 is the same rule as just-in-time lookups — fetch, write the result as an event, then apply. Config is
@@ -242,11 +245,22 @@ whether the framework owns the state, not how the state is built.
 
 ### External data in a decision: reactor plus a second event (D43)
 
-An aggregate cannot call out — `decide` is non-suspending, which is D3. The reason is not performance:
-**a suspending `decide` breaks replay**, because re-running it later re-queries a blocklist that has
-changed or a temperature that has moved, producing a decision history that was never recorded.
+`decide` suspends (D3), so an aggregate *can* call out. An earlier draft forbade it on the grounds that
+**a suspending `decide` breaks replay** — wrong: replay folds output events through `apply` and never
+re-runs `decide`. The places `decide` does run twice don't need purity either:
 
-Had it been allowed, the blast radius has three layers, and only the innermost is unavoidable:
+- **Redelivery after a crash** between appending the outcome and committing past `CommandReceived`.
+  A pure `decide` appends an *identical* duplicate, which is still a duplicate. Dedup by causation
+  (command id) or transactional read-process-write is needed regardless, and with it the first
+  outcome wins whatever the second would have been.
+- **Shadow-testing new logic** over recorded `CommandReceived` history. Genuine input replay, and
+  external calls weaken it. Useful, not load-bearing.
+
+And the auditability concern — a decision whose inputs never reached the log — is met by recording the
+fetched value in the outcome event, which needs neither purity nor a reactor.
+
+So the argument is **availability (D20), not correctness**. The blast radius of an inline call has
+three layers, and only the innermost is unavoidable:
 
 - **Every key in that partition** stalls behind the call. At 256 partitions and 100k accounts that is
   ~390 accounts. This is the real cost.
@@ -262,14 +276,15 @@ The keys-behind-one-call number is set by the keys-to-*partitions* ratio, not by
 more partitions reduce it — and partition count is fixed at provision time, with repartitioning
 destructive to key affinity (D15). So it has to be over-provisioned up front.
 
-Two mechanisms, and **the decision for now is the second**:
+Three mechanisms. All are permitted; **the second is the recommendation**:
 
 | | How | Cost |
 |---|---|---|
+| Inline call | `decide` suspends on the call directly. | Blocks the partition for the call, every time. Fine for fast, local, rarely-failing dependencies |
 | Just-in-time lookup | Framework fetches before `decide`, appends the result as an event, applies it, then calls the pure function. Replay skips the fetch and applies the record. | Still blocks the partition for the fetch; only viable with a TTL cache making it rare |
 | **Reactor plus a second event** | A reactor consumes `CommandReceived`, does the call, emits `BlocklistChecked`; the aggregate reacts to *that*. | The command's outcome is no longer a single verdict — it becomes a choreographed multi-step flow |
 
-Chosen because it keeps the aggregate path fast and pure, parallelises naturally, and reuses the saga
+Recommended because it keeps the aggregate path fast, parallelises naturally, and reuses the saga
 shape already established rather than adding a second mechanism. Revisit if the multi-step cost proves
 too high for common cases.
 
@@ -277,8 +292,8 @@ too high for common cases.
 sources, sinks mapping to external systems. Not modelled yet; the current `reactor` is a placeholder for
 a family.
 
-**Blocking calls are the unsolved half (Q12).** `decide` being non-suspending prevents *suspend* calls,
-not *blocking* ones — nothing stops a JDBC query or `Thread.sleep` inside it, and the same is true of
+**Blocking calls are the unsolved half (Q12).** Suspending was never the node-level hazard; blocking
+is. Nothing stops a JDBC query or `Thread.sleep` inside `decide`, `apply`, or
 `EventSourcedReadModel.apply`. Enough concurrent blocking calls exhaust `Dispatchers.Default` and stall
 the node, not just the partition.
 
@@ -297,9 +312,8 @@ their own. JDK 25 makes this safe: JEP 491 removed the `synchronized` pinning th
 Only per-key concurrency within a partition addresses the first row, and that is the watermark-commit
 problem below. The dispatcher parameter is also the seam Q11 needs for virtual-time tests.
 
-**Unenforced hazard:** nothing stops a `var` inside an aggregate. Purity is what makes one instance safe
-across every partition, and a mutable field is a silent data race with no error. `decide` being
-non-suspending prevents I/O, not state.
+**Unenforced hazard:** nothing stops a `var` inside an aggregate. Statelessness is what makes one instance
+safe across every partition, and a mutable field is a silent data race with no error.
 
 **Deeper point worth keeping:** per-*key* ordering is the guarantee; partition-sequential execution is
 merely the simplest implementation of it. An engine could run keys within a partition concurrently and
@@ -793,10 +807,10 @@ Three kinds, and conflating them causes trouble:
 |---|---|---|---|
 | **Behaviour** the object can perform | `handle(state, command)`, `apply(state, event)` | On the object — tell, don't ask | Yes |
 | **Data the framework needs for its own work** | routing key, occurrence id | Extracted — the object can't route itself | Yes, must be pure |
-| **Data that lives elsewhere** | idempotency records, correlation with prior events | A **suspending lookup** — a distinct capability | **No** — violates D3 |
+| **Data that lives elsewhere** | idempotency records, correlation with prior events | A **suspending lookup** — a distinct capability | In `decide` only, at the cost of the partition stall (D43); never in `apply` |
 
 The third is why just-in-time lookups exist: fetch *before* `handle`, write the result as an event, so
-the aggregate stays pure and replay stays deterministic without an external call.
+the outcome records what the decision was based on and `apply` never needs the external call.
 
 ### Capability contract
 
@@ -806,7 +820,7 @@ partition consumer. That's a contract, not an implementation detail:
 - thread-safe caches, not naive maps
 - **bounded** caches — same byte-bounded lesson as the blob cache
 - framework owns construction and disposal; `AutoCloseable` where resources are held
-- **on the aggregate path, pure-modulo-memoization**: a cache may change speed, never results. A
+- **on the `apply` path, pure-modulo-memoization**: a cache may change speed, never results. A
   capability that broke that would break replay silently
 
 Caching is worth real money here: lattice does `commandBindings.find { it.factType.isAssignableFrom(...) }`
@@ -1033,8 +1047,8 @@ Design, if used:
 - **Producer writes the blob before publishing the event**, or consumers race a reference to nothing.
   Orphan blobs on failure are harmless: content-addressed, dedupe on retry, cheap enough to never collect.
 - **Lazy, suspending access** — pay only if touched.
-- **Aggregates cannot dereference.** They're pure and non-suspending, so anything behind a claim-check
-  is invisible to them. Correct on its own merits and load-bearing for D20.
+- **Aggregates should not dereference.** `apply` cannot (non-suspending); `decide` could, but that puts
+  the blob store on the partition's critical path, against D20.
 - **One node-level content-addressed cache**, not a separate per-event memo — same code, plus cross-event
   and cross-retry hits. Must be **single-flight** (memoize the `Deferred`) and **bounded in bytes, not
   entries**: 100 concurrent events × 5MB pinned is 500MB of heap.

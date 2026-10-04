@@ -253,7 +253,7 @@ private class RegisteredAggregate(
     val commandKey: (Command) -> String,
     val eventKey: (DomainEvent) -> String,
     val initialState: Any?,
-    val decide: (Any?, Command) -> Decision<DomainEvent>,
+    val decide: suspend (Any?, Command) -> Decision<DomainEvent>,
     val apply: (Any?, DomainEvent) -> Any?,
 )
 

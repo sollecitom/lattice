@@ -42,7 +42,7 @@ object BankAccount : Aggregate<Deposit, DepositProcessed, AccountState> {
 
     override val initialState = AccountState()
 
-    override fun decide(state: AccountState, command: Deposit): Decision<DepositProcessed> =
+    override suspend fun decide(state: AccountState, command: Deposit): Decision<DepositProcessed> =
         accept(DepositProcessed(command.accountId, command.amount, state.balance + command.amount))
 
     override fun apply(state: AccountState, event: DepositProcessed) =

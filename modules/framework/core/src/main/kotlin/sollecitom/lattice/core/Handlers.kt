@@ -17,7 +17,7 @@ interface Aggregate<COMMAND : Command, EVENT : DomainEvent, STATE> {
 
     val initialState: STATE
 
-    fun decide(state: STATE, command: COMMAND): Decision<EVENT>
+    suspend fun decide(state: STATE, command: COMMAND): Decision<EVENT>
 
     fun apply(state: STATE, event: EVENT): STATE
 }
