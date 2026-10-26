@@ -7,7 +7,7 @@ assertk = "0.28.1"
 kotlinx-datetime = "0.8.0"
 # plugins
 sollecitom-gradle-plugins = "1.0.50"
-sollecitom-swissknife = "1.0.66"
+sollecitom-swissknife = "1.0.67"
 palantir-git-plugin = "5.1.0"
 
 [libraries]
